@@ -1313,14 +1313,14 @@ def main() -> None:
         ("Animals / Fixes", animals_fixes,                       "0 0 auto"),
     ]
     kpi_html = "".join(
-        f"""<div style='flex:{flex};min-width:0;background:#f0f4f8;border-radius:8px;
-                        padding:5px 10px;border-top:3px solid #1565c0'>
-              <div style='font-size:.6rem;color:#777;font-weight:700;font-family:sans-serif;
+        f"""<div style='flex:{flex};background:#f0f4f8;border-radius:8px;
+                        padding:7px 14px;border-top:3px solid #1565c0'>
+              <div style='font-size:.72rem;color:#666;font-weight:700;font-family:sans-serif;
                           text-transform:uppercase;letter-spacing:.6px;
                           white-space:nowrap'>{lbl}</div>
-              <div style='font-size:.82rem;font-weight:700;color:#0d1b2a;
+              <div style='font-size:1rem;font-weight:700;color:#0d1b2a;
                           font-family:"Inter","Segoe UI",sans-serif;
-                          white-space:nowrap;overflow:hidden;text-overflow:ellipsis'>{val}</div>
+                          white-space:nowrap'>{val}</div>
             </div>"""
         for lbl, val, flex in kpi_items
     )
