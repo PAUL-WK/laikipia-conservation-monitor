@@ -1,0 +1,12 @@
+streamlit>=1.35.0
+folium>=0.17.0
+streamlit-folium>=0.20.0
+pandas>=2.0.0
+numpy>=1.26.0
+plotly>=5.20.0
+earthengine-api>=0.1.390
+geopandas>=0.14.0
+scipy>=1.12.0
+tqdm>=4.66.0
+colorlog>=6.8.0
+shapely>=2.0.0

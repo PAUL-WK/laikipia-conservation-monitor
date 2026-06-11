@@ -1,0 +1,29 @@
+# ── Virtual environment ────────────────────────────────────────────────────────
+conservation_env/
+
+# ── Secret credentials — NEVER commit ─────────────────────────────────────────
+**/secrets/
+**/*.json
+!**/sample_*.json
+
+# ── Python artefacts ───────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# ── Output / data files ────────────────────────────────────────────────────────
+output_*.csv
+covariates_*.csv
+
+# ── OS / editor ───────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# ── Streamlit cache ───────────────────────────────────────────────────────────
+.streamlit/secrets.toml

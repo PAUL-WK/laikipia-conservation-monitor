@@ -1,0 +1,14 @@
+# ── Secret credentials — NEVER commit these ──────────────────────────────────
+secrets/
+*.json
+!sample_*.json
+
+# ── Python artefacts ──────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+
+# ── Outputs ───────────────────────────────────────────────────────────────────
+output_*.csv
+covariates_*.csv
