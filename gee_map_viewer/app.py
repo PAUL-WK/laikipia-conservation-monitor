@@ -135,20 +135,23 @@ ANIMAL_COLOURS = [
 @st.cache_resource(show_spinner="Connecting to satellite data...")
 def init_gee(key_path: Path, project: str) -> bool:
     try:
+        import base64
         from google.oauth2 import service_account
         SCOPES = ["https://www.googleapis.com/auth/earthengine"]
 
         # Local dev: key file on disk
         if key_path.exists():
             info = json.loads(key_path.read_text(encoding="utf-8"))
-        # Streamlit Cloud: credentials stored in st.secrets
+        # Streamlit Cloud: base64-encoded JSON (avoids all TOML newline issues)
+        elif "gee_key_b64" in st.secrets:
+            info = json.loads(base64.b64decode(st.secrets["gee_key_b64"]).decode("utf-8"))
+        # Streamlit Cloud: individual fields in [gee] section (fallback)
         elif "gee" in st.secrets:
             info = dict(st.secrets["gee"])
-            # TOML stores \n as literal backslash-n — convert back to real newlines
             if "private_key" in info:
                 info["private_key"] = info["private_key"].replace("\\n", "\n")
         else:
-            st.error("No satellite credentials found. Add a [gee] section to Streamlit secrets.")
+            st.error("No satellite credentials found. Add gee_key_b64 to Streamlit secrets.")
             return False
 
         creds = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
@@ -1297,17 +1300,32 @@ def main() -> None:
         else:
             st.error("Satellite data offline",     icon="❌")
 
-    # KPIs
-    k1, k2, k3, k4, k5 = st.columns(5)
-    k1.metric("Mode",         "Compare" if compare else "Single")
-    k2.metric("Period A",     f"{str_a} → {ste_a}")
-    k3.metric("Period B",     f"{str_b} → {ste_b}" if compare else "—")
-    k4.metric("Active Layers", len(active_layers))
-    if gps_df is not None:
-        k5.metric("Animals / Fixes",
-                  f"{gps_df['animal_id'].nunique()} / {len(gps_df):,}")
-    else:
-        k5.metric("Animals / Fixes", "— / —")
+    # KPIs — compact inline cards
+    animals_fixes = (
+        f"{gps_df['animal_id'].nunique()} / {len(gps_df):,}" if gps_df is not None else "— / —"
+    )
+    kpi_items = [
+        ("Mode",           "Compare" if compare else "Single"),
+        ("Period A",       f"{str_a} → {ste_a}"),
+        ("Period B",       f"{str_b} → {ste_b}" if compare else "—"),
+        ("Active Layers",  str(len(active_layers))),
+        ("Animals / Fixes", animals_fixes),
+    ]
+    kpi_html = "".join(
+        f"""<div style='flex:1;min-width:0;background:#f0f4f8;border-radius:8px;
+                        padding:6px 10px;border-top:3px solid #1565c0'>
+              <div style='font-size:.62rem;color:#555;font-weight:700;
+                          text-transform:uppercase;letter-spacing:.5px;
+                          white-space:nowrap;overflow:hidden;text-overflow:ellipsis'>{lbl}</div>
+              <div style='font-size:.78rem;font-weight:700;color:#0d1b2a;
+                          white-space:nowrap;overflow:hidden;text-overflow:ellipsis'>{val}</div>
+            </div>"""
+        for lbl, val in kpi_items
+    )
+    st.markdown(
+        f"<div style='display:flex;gap:8px;margin-bottom:4px'>{kpi_html}</div>",
+        unsafe_allow_html=True,
+    )
 
     st.divider()
 
