@@ -144,6 +144,9 @@ def init_gee(key_path: Path, project: str) -> bool:
         # Streamlit Cloud: credentials stored in st.secrets
         elif "gee" in st.secrets:
             info = dict(st.secrets["gee"])
+            # TOML stores \n as literal backslash-n — convert back to real newlines
+            if "private_key" in info:
+                info["private_key"] = info["private_key"].replace("\\n", "\n")
         else:
             st.error("No satellite credentials found. Add a [gee] section to Streamlit secrets.")
             return False
