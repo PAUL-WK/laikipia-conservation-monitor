@@ -1304,26 +1304,28 @@ def main() -> None:
     animals_fixes = (
         f"{gps_df['animal_id'].nunique()} / {len(gps_df):,}" if gps_df is not None else "— / —"
     )
+    # flex hints: period cards get more room, others shrink to content
     kpi_items = [
-        ("Mode",           "Compare" if compare else "Single"),
-        ("Period A",       f"{str_a} → {ste_a}"),
-        ("Period B",       f"{str_b} → {ste_b}" if compare else "—"),
-        ("Active Layers",  str(len(active_layers))),
-        ("Animals / Fixes", animals_fixes),
+        ("Mode",            "Compare" if compare else "Single",  "0 0 auto"),
+        ("Period A",        f"{str_a} → {ste_a}",                "1 1 160px"),
+        ("Period B",        f"{str_b} → {ste_b}" if compare else "—", "1 1 160px"),
+        ("Active Layers",   str(len(active_layers)),             "0 0 auto"),
+        ("Animals / Fixes", animals_fixes,                       "0 0 auto"),
     ]
     kpi_html = "".join(
-        f"""<div style='flex:1;min-width:0;background:#f0f4f8;border-radius:8px;
-                        padding:6px 10px;border-top:3px solid #1565c0'>
-              <div style='font-size:.62rem;color:#555;font-weight:700;
-                          text-transform:uppercase;letter-spacing:.5px;
-                          white-space:nowrap;overflow:hidden;text-overflow:ellipsis'>{lbl}</div>
-              <div style='font-size:.78rem;font-weight:700;color:#0d1b2a;
+        f"""<div style='flex:{flex};min-width:0;background:#f0f4f8;border-radius:8px;
+                        padding:5px 10px;border-top:3px solid #1565c0'>
+              <div style='font-size:.6rem;color:#777;font-weight:700;font-family:sans-serif;
+                          text-transform:uppercase;letter-spacing:.6px;
+                          white-space:nowrap'>{lbl}</div>
+              <div style='font-size:.82rem;font-weight:700;color:#0d1b2a;
+                          font-family:"Inter","Segoe UI",sans-serif;
                           white-space:nowrap;overflow:hidden;text-overflow:ellipsis'>{val}</div>
             </div>"""
-        for lbl, val in kpi_items
+        for lbl, val, flex in kpi_items
     )
     st.markdown(
-        f"<div style='display:flex;gap:8px;margin-bottom:4px'>{kpi_html}</div>",
+        f"<div style='display:flex;gap:8px;margin-bottom:4px;align-items:stretch'>{kpi_html}</div>",
         unsafe_allow_html=True,
     )
 
