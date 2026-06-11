@@ -132,17 +132,25 @@ ANIMAL_COLOURS = [
 # GEE AUTH
 # ══════════════════════════════════════════════════════════════════════════════
 
-@st.cache_resource(show_spinner="Connecting to Google Earth Engine...")
+@st.cache_resource(show_spinner="Connecting to satellite data...")
 def init_gee(key_path: Path, project: str) -> bool:
     try:
-        with open(key_path, encoding="utf-8") as fh:
-            info = json.load(fh)
-        creds = ee.ServiceAccountCredentials(
-            email=info["client_email"],
-            key_file=str(key_path),
-        )
+        from google.oauth2 import service_account
+        SCOPES = ["https://www.googleapis.com/auth/earthengine"]
+
+        # Local dev: key file on disk
+        if key_path.exists():
+            info = json.loads(key_path.read_text(encoding="utf-8"))
+        # Streamlit Cloud: credentials stored in st.secrets
+        elif "gee" in st.secrets:
+            info = dict(st.secrets["gee"])
+        else:
+            st.error("No satellite credentials found. Add a [gee] section to Streamlit secrets.")
+            return False
+
+        creds = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
         ee.Initialize(credentials=creds, project=project)
-        ee.Number(1).getInfo()          # ping
+        ee.Number(1).getInfo()   # ping
         return True
     except Exception as exc:
         st.error(f"Satellite auth failed: {exc}")
