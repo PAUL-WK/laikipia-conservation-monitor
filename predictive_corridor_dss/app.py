@@ -99,11 +99,22 @@ WATER_POINTS = [(36.95, 0.30), (37.25, 0.85), (37.05, 0.55)]
 FENCE_LINE = [(37.30, 0.20), (37.35, 0.45), (37.30, 0.70), (37.20, 0.95)]   # smart-fence vector
 COMMUNITY_FARMS = [(37.32, 0.25, "Sector C4"), (37.28, 0.60, "Sector C7"), (37.18, 0.92, "Sector C9")]
 
-TIMELINES = {
-    "Today (Live)":              {"days_out": 0, "temp_bump": 0.0, "rain_decay": 1.00, "ndvi_shock": 1.00},
-    "3 Days Out (Predictive)":   {"days_out": 3, "temp_bump": 1.5, "rain_decay": 0.65, "ndvi_shock": 1.35},
-    "7 Days Out (Predictive Forecast)": {"days_out": 7, "temp_bump": 3.2, "rain_decay": 0.35, "ndvi_shock": 1.85},
-}
+HIST_DAYS = 35           # total simulated telemetry window: 14 quiet lead-in + 21-day shock cycle
+MAX_FORECAST_DAYS = 14   # furthest the predictive engine will project
+
+def scenario_for_days_out(days_out: float) -> dict:
+    """
+    Continuous escalation of thermal stress / rainfall decay / NDVI shock as a
+    function of how far into the future we're projecting — replaces fixed
+    Today/3-Day/7-Day buckets with a smooth function so any date can be picked.
+    """
+    f = max(0.0, min(days_out, MAX_FORECAST_DAYS)) / MAX_FORECAST_DAYS
+    return {
+        "days_out": days_out,
+        "temp_bump": 4.0 * f,
+        "rain_decay": 1.0 - 0.70 * f,
+        "ndvi_shock": 1.0 + 1.20 * f,
+    }
 
 RISK_PALETTE = [
     "#ffffb2", "#fed976", "#feb24c", "#fd8d3c",
@@ -222,6 +233,7 @@ def fetch_live_environmental_layers(gee_ready: bool, ref_date: str) -> dict:
 
             lst_mapid  = lst_img.getMapId({"min": 15, "max": 45, "palette": RISK_PALETTE})
             ndvi_mapid = ndvi_anom_img.getMapId({"min": -0.5, "max": 0.5, "palette": ["#800026", "#ffffb2", "#1a9850"]})
+            rain_mapid = chirps_img.getMapId({"min": 0, "max": 60, "palette": ["#ffffff", "#c6dbef", "#6baed6", "#2171b5", "#08306b"]})
 
             stats = (
                 lst_img.rename("lst")
@@ -232,8 +244,10 @@ def fetch_live_environmental_layers(gee_ready: bool, ref_date: str) -> dict:
             )
             return {
                 "source": "live",
+                "ref_date": ref_date,
                 "lst_tile_url": lst_mapid["tile_fetcher"].url_format,
                 "ndvi_tile_url": ndvi_mapid["tile_fetcher"].url_format,
+                "rain_tile_url": rain_mapid["tile_fetcher"].url_format,
                 "mean_lst_c": float(stats.get("lst") or 30.0),
                 "mean_rain_mm": float(stats.get("rain") or 5.0),
                 "mean_ndvi_anom": float(stats.get("ndvi") or -0.1),
@@ -242,11 +256,13 @@ def fetch_live_environmental_layers(gee_ready: bool, ref_date: str) -> dict:
             st.session_state["_gee_fetch_error"] = str(exc)
 
     # ── Synthetic fallback surface (deterministic, seeded) ──────────────────
-    rng = np.random.default_rng(SEED)
+    rng = np.random.default_rng(abs(hash(ref_date)) % (2**31))
     return {
         "source": "synthetic",
+        "ref_date": ref_date,
         "lst_tile_url": None,
         "ndvi_tile_url": None,
+        "rain_tile_url": None,
         "mean_lst_c": round(34.0 + rng.normal(0, 1.5), 1),
         "mean_rain_mm": round(max(0.0, rng.normal(4.0, 2.0)), 1),
         "mean_ndvi_anom": round(float(rng.normal(-0.15, 0.08)), 3),
@@ -267,7 +283,8 @@ def mock_earthranger_stream(env: dict, seed: int = SEED) -> pd.DataFrame:
     used downstream to validate the statistical lag detector.
     """
     rng = np.random.default_rng(seed)
-    n_days = 21
+    lead_in_days = HIST_DAYS - 21  # quiet baseline period before the shock cycle
+    n_days = HIST_DAYS
     n_hours = n_days * 24
     base_date = datetime.combine(date.today() - timedelta(days=n_days), datetime.min.time())
     hourly_idx = pd.date_range(base_date, periods=n_hours, freq="h")
@@ -277,10 +294,14 @@ def mock_earthranger_stream(env: dict, seed: int = SEED) -> pd.DataFrame:
     ndvi = np.zeros(n_days)
     val = env["mean_ndvi_anom"]
     for i in range(n_days):
-        if i < 14:
-            tmax[i] = env["mean_lst_c"] - 4 + i * 0.65 + rng.normal(0, 0.4)
+        j = i - lead_in_days  # index into the 21-day shock cycle, negative during lead-in
+        if j < 0:
+            tmax[i] = env["mean_lst_c"] - 4 + rng.normal(0, 0.4)
+            val += rng.normal(0, 0.01)
+        elif j < 14:
+            tmax[i] = env["mean_lst_c"] - 4 + j * 0.65 + rng.normal(0, 0.4)
             val -= 0.03 + rng.normal(0, 0.01)
-        elif i < 16:
+        elif j < 16:
             tmax[i] = env["mean_lst_c"] - 8 + rng.normal(0, 0.5)
             val += 0.05 + rng.normal(0, 0.01)
         else:
@@ -335,10 +356,14 @@ def mock_earthranger_stream(env: dict, seed: int = SEED) -> pd.DataFrame:
             })
 
     df = pd.DataFrame(records)
+    df["recorded_date"] = df["recorded_at"].dt.date
     df.attrs["shock_day"] = shock_day
     df.attrs["shock_hour"] = shock_hour
+    df.attrs["base_date"] = base_date.date()
     df.attrs["climate_daily"] = pd.DataFrame({
-        "day": np.arange(n_days), "tmax_c": tmax.round(2), "ndvi_anomaly": ndvi.round(3),
+        "day": np.arange(n_days),
+        "calendar_date": [base_date.date() + timedelta(days=int(i)) for i in range(n_days)],
+        "tmax_c": tmax.round(2), "ndvi_anomaly": ndvi.round(3),
     })
     return df
 
@@ -642,22 +667,31 @@ def risk_colour(score: float) -> str:
 def build_operational_map(env: dict, telemetry_df: pd.DataFrame, steps_df: pd.DataFrame,
                            grid_df: pd.DataFrame, bulls_shown: list[str],
                            baseline_corridors: dict, projections: dict,
-                           show_counterfactual: bool, timeline_label: str) -> folium.Map:
+                           show_counterfactual: bool, timeline_label: str,
+                           active_layers: set[str] | None = None) -> folium.Map:
     clat = (BBOX["min_lat"] + BBOX["max_lat"]) / 2
     clon = (BBOX["min_lon"] + BBOX["max_lon"]) / 2
     m = folium.Map(location=[clat, clon], zoom_start=9, tiles="CartoDB dark_matter")
+    active_layers = active_layers if active_layers is not None else {"NDVI", "LST", "Rainfall"}
 
-    # ── Live GEE raster stream (NDVI anomaly / LST) ─────────────────────────
+    # ── Live GEE raster stream (NDVI anomaly / LST / Rainfall) — togglable ──
     if env.get("source") == "live" and env.get("ndvi_tile_url"):
         folium.raster_layers.TileLayer(
             tiles=env["ndvi_tile_url"], attr="Google Earth Engine — NDVI Anomaly",
             name="NDVI Anomaly (Live GEE)", overlay=True, opacity=0.55,
+            show="NDVI" in active_layers,
         ).add_to(m)
     if env.get("source") == "live" and env.get("lst_tile_url"):
         folium.raster_layers.TileLayer(
             tiles=env["lst_tile_url"], attr="Google Earth Engine — LST",
-            name="Land Surface Temp (Live GEE)", overlay=True, opacity=0.0,
-            show=False,
+            name="Land Surface Temp (Live GEE)", overlay=True, opacity=0.55,
+            show="LST" in active_layers,
+        ).add_to(m)
+    if env.get("source") == "live" and env.get("rain_tile_url"):
+        folium.raster_layers.TileLayer(
+            tiles=env["rain_tile_url"], attr="Google Earth Engine — CHIRPS Rainfall",
+            name="Rainfall (Live GEE)", overlay=True, opacity=0.55,
+            show="Rainfall" in active_layers,
         ).add_to(m)
 
     # ── Risk grid (bottleneck cells glow hotter on longer horizons) ─────────
@@ -762,10 +796,9 @@ DEVIATION_ALERT_KM = 2.5    # deviation beyond this from baseline triggers a pro
 FENCE_ALERT_KM     = 3.0    # proximity to fence beyond which risk is considered imminent
 
 
-def build_tactical_directive(bull: str, metrics: dict, timeline_label: str) -> dict:
+def build_tactical_directive(bull: str, metrics: dict, days_out: float) -> dict:
     """Compose the automated field-commander directive if thresholds are breached."""
-    days_out = TIMELINES[timeline_label]["days_out"]
-    eta = (date.today() + timedelta(days=days_out)).strftime("%A %d %b")
+    eta = (date.today() + timedelta(days=round(days_out))).strftime("%A %d %b")
 
     critical = metrics["deviation_km"] >= DEVIATION_ALERT_KM or metrics["fence_distance_km"] <= FENCE_ALERT_KM
 
@@ -833,9 +866,69 @@ def main() -> None:
     else:
         st.sidebar.warning(f"🛰️ Live GEE unavailable — using synthetic fallback.\n\n{gee_msg}", icon="⚠️")
 
-    st.sidebar.markdown("**🕒 Forecast Timeline**")
-    timeline_label = st.sidebar.radio("Predictive horizon", list(TIMELINES.keys()), index=0)
-    timeline_params = TIMELINES[timeline_label]
+    st.sidebar.markdown("**🕒 Temporal Mode**")
+    temporal_mode = st.sidebar.radio(
+        "Mode", ["📅 Historical Review", "🔴 Live (Today)", "🔮 Predictive Forecast"], index=1,
+        label_visibility="collapsed",
+    )
+
+    today = date.today()
+    hist_floor = today - timedelta(days=HIST_DAYS)
+    timeline_label = "Today (Live)"
+    days_out = 0.0
+    hist_range: tuple[date, date] | None = None
+
+    if temporal_mode == "📅 Historical Review":
+        pick_mode = st.sidebar.radio("Pick", ["Single date", "Date range"], horizontal=True)
+        if pick_mode == "Single date":
+            d = st.sidebar.date_input(
+                "Historical date", value=today - timedelta(days=7),
+                min_value=hist_floor, max_value=today - timedelta(days=1),
+            )
+            hist_range = (d, d)
+        else:
+            d0, d1 = st.sidebar.date_input(
+                "Historical range", value=(today - timedelta(days=14), today - timedelta(days=8)),
+                min_value=hist_floor, max_value=today - timedelta(days=1),
+            )
+            hist_range = (min(d0, d1), max(d0, d1))
+        timeline_label = f"Historical Review — {hist_range[0]:%d %b} to {hist_range[1]:%d %b}"
+        days_out = 0.0
+        ref_date_for_tiles = hist_range[1].isoformat()
+
+    elif temporal_mode == "🔴 Live (Today)":
+        timeline_label = "Today (Live)"
+        days_out = 0.0
+        ref_date_for_tiles = today.isoformat()
+
+    else:  # Predictive Forecast
+        pick_mode = st.sidebar.radio("Pick", ["Single date", "Date range"], horizontal=True)
+        if pick_mode == "Single date":
+            d = st.sidebar.date_input(
+                "Forecast date", value=today + timedelta(days=7),
+                min_value=today + timedelta(days=1), max_value=today + timedelta(days=MAX_FORECAST_DAYS),
+            )
+            days_out = float((d - today).days)
+            timeline_label = f"Predictive Forecast — {d:%A %d %b} (+{int(days_out)}d)"
+        else:
+            d0, d1 = st.sidebar.date_input(
+                "Forecast range", value=(today + timedelta(days=3), today + timedelta(days=10)),
+                min_value=today + timedelta(days=1), max_value=today + timedelta(days=MAX_FORECAST_DAYS),
+            )
+            d1 = max(d0, d1)
+            days_out = float((d1 - today).days)
+            timeline_label = f"Predictive Forecast — {d0:%d %b} to {d1:%d %b} (+{int(days_out)}d)"
+        ref_date_for_tiles = today.isoformat()  # GEE has no future imagery — latest observed reference
+
+    timeline_params = scenario_for_days_out(days_out)
+
+    st.sidebar.divider()
+    st.sidebar.markdown("**🗺️ Map Layers**")
+    layer_cols = st.sidebar.columns(3)
+    show_ndvi = layer_cols[0].checkbox("NDVI", value=True)
+    show_lst = layer_cols[1].checkbox("LST", value=False)
+    show_rain = layer_cols[2].checkbox("Rain", value=False)
+    active_layers = {n for n, v in [("NDVI", show_ndvi), ("LST", show_lst), ("Rainfall", show_rain)] if v}
 
     st.sidebar.divider()
     st.sidebar.markdown("**🐘 Telemetry Display**")
@@ -854,7 +947,7 @@ def main() -> None:
     """, unsafe_allow_html=True)
 
     # ── Layer 1: live ingestion ───────────────────────────────────────────────
-    env = fetch_live_environmental_layers(gee_ready, date.today().isoformat())
+    env = fetch_live_environmental_layers(gee_ready, ref_date_for_tiles)
     if env["source"] == "synthetic" and "_gee_fetch_error" in st.session_state:
         st.info(
             f"GEE query fell back to synthetic data: {st.session_state['_gee_fetch_error']}",
@@ -872,16 +965,31 @@ def main() -> None:
     cov_df = extract_step_covariates(steps_df, climate_daily, base_date, WATER_POINTS)
     beta_table, mu, sigma = fit_ssf_logistic(cov_df)
 
-    # ── Layer 3: predictive deviation per bull ────────────────────────────────
+    is_historical = temporal_mode == "📅 Historical Review"
+    if is_historical:
+        hist_telemetry_df = telemetry_df[
+            (telemetry_df["recorded_date"] >= hist_range[0]) & (telemetry_df["recorded_date"] <= hist_range[1])
+        ]
+        if hist_telemetry_df.empty:
+            hist_telemetry_df = telemetry_df
+
+    # ── Layer 3: predictive deviation per bull (suppressed in Historical mode) ─
     baseline_corridors, projections, metrics_by_bull = {}, {}, {}
     for bull in BULLS:
         baseline_corridors[bull] = build_baseline_corridor(telemetry_df, bull)
-        proj = project_forward_trajectory(
-            telemetry_df, bull, timeline_params["days_out"],
-            timeline_params["temp_bump"], timeline_params["rain_decay"], timeline_params["ndvi_shock"],
-        )
-        projections[bull] = proj
-        metrics_by_bull[bull] = compute_deviation_metrics(baseline_corridors[bull], proj)
+        if is_historical:
+            actual = hist_telemetry_df[hist_telemetry_df["subject_id"] == bull][["lon", "lat"]].reset_index(drop=True)
+            if actual.empty:
+                actual = pd.DataFrame({"lon": [baseline_corridors[bull][-1][0]], "lat": [baseline_corridors[bull][-1][1]]})
+            projections[bull] = actual
+            metrics_by_bull[bull] = compute_deviation_metrics(baseline_corridors[bull], actual)
+        else:
+            proj = project_forward_trajectory(
+                telemetry_df, bull, timeline_params["days_out"],
+                timeline_params["temp_bump"], timeline_params["rain_decay"], timeline_params["ndvi_shock"],
+            )
+            projections[bull] = proj
+            metrics_by_bull[bull] = compute_deviation_metrics(baseline_corridors[bull], proj)
 
     # ── Risk grid ──────────────────────────────────────────────────────────────
     grid_df = generate_risk_grid(BBOX, grid_res)
@@ -895,7 +1003,7 @@ def main() -> None:
 
     kpis = [
         ("Data Source",        "Live GEE" if env["source"] == "live" else "Synthetic"),
-        ("Horizon",             timeline_label.split()[0]),
+        ("Mode",                temporal_mode.split(" ", 1)[1] if " " in temporal_mode else temporal_mode),
         ("Mean Tmax",           f"{env['mean_lst_c']:.1f}°C"),
         ("Mean Detected Lag",   f"{mean_lag:.0f} h"),
         ("Peak Bottleneck Risk", f"{peak_risk:.1f}%"),
@@ -914,7 +1022,17 @@ def main() -> None:
     directive_cols = st.columns(len(BULLS))
     for col, bull in zip(directive_cols, BULLS):
         with col:
-            directive = build_tactical_directive(bull, metrics_by_bull[bull], timeline_label)
+            if is_historical:
+                directive = {
+                    "critical": False,
+                    "title": f"📅 {bull} — Historical Record",
+                    "body": (
+                        f"Actual recorded deviation {metrics_by_bull[bull]['deviation_km']} km from "
+                        f"baseline corridor during {timeline_label}; review only, no forecast applied."
+                    ),
+                }
+            else:
+                directive = build_tactical_directive(bull, metrics_by_bull[bull], days_out)
             render_dispatch_panel(directive)
 
     # ── Map + side analytics ───────────────────────────────────────────────────
@@ -926,6 +1044,7 @@ def main() -> None:
         op_map = build_operational_map(
             env, telemetry_df, steps_df, risk_df, bulls_shown,
             baseline_corridors, projections, show_counterfactual, timeline_label,
+            active_layers=active_layers,
         )
         st_folium(op_map, height=560, use_container_width=True)
 
@@ -944,11 +1063,10 @@ def main() -> None:
     # ── Divergence analytics ───────────────────────────────────────────────────
     st.markdown("<div class='section-header'>Ancestral Baseline vs. Climate-Stressed Reality — 7-Day Divergence</div>",
                 unsafe_allow_html=True)
+    seven_day = scenario_for_days_out(7)
     div_df = divergence_series(
         baseline_corridors[focus_bull], telemetry_df, focus_bull,
-        TIMELINES["7 Days Out (Predictive Forecast)"]["temp_bump"],
-        TIMELINES["7 Days Out (Predictive Forecast)"]["rain_decay"],
-        TIMELINES["7 Days Out (Predictive Forecast)"]["ndvi_shock"],
+        seven_day["temp_bump"], seven_day["rain_decay"], seven_day["ndvi_shock"],
     )
     base = alt.Chart(div_df).encode(x=alt.X("day:O", title="Days From Today"))
     line_dev = base.mark_line(point=True, color="#e63946", strokeWidth=2.5).encode(
