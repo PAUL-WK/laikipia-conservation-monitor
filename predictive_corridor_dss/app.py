@@ -672,8 +672,17 @@ def build_operational_map(env: dict, telemetry_df: pd.DataFrame, steps_df: pd.Da
                            active_layers: set[str] | None = None) -> folium.Map:
     clat = (BBOX["min_lat"] + BBOX["max_lat"]) / 2
     clon = (BBOX["min_lon"] + BBOX["max_lon"]) / 2
-    m = folium.Map(location=[clat, clon], zoom_start=9, tiles="CartoDB dark_matter")
+    m = folium.Map(location=[clat, clon], zoom_start=9, tiles=None)
     active_layers = active_layers if active_layers is not None else {"NDVI", "LST", "Rainfall"}
+
+    # ── Selectable basemaps (radio group, top-right in-map panel) ───────────
+    folium.TileLayer("CartoDB dark_matter", name="Dark Matter", overlay=False, control=True, show=True).add_to(m)
+    folium.TileLayer("CartoDB positron", name="Positron (Light)", overlay=False, control=True, show=False).add_to(m)
+    folium.TileLayer("OpenStreetMap", name="OpenStreetMap", overlay=False, control=True, show=False).add_to(m)
+    folium.TileLayer(
+        tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        attr="Esri World Imagery", name="Satellite (Esri)", overlay=False, control=True, show=False,
+    ).add_to(m)
 
     # ── Live GEE raster stream (NDVI anomaly / LST / Rainfall) — togglable ──
     if env.get("source") == "live" and env.get("ndvi_tile_url"):
@@ -924,14 +933,6 @@ def main() -> None:
     timeline_params = scenario_for_days_out(days_out)
 
     st.sidebar.divider()
-    st.sidebar.markdown("**🗺️ Map Layers**")
-    layer_cols = st.sidebar.columns(3)
-    show_ndvi = layer_cols[0].checkbox("NDVI", value=True)
-    show_lst = layer_cols[1].checkbox("LST", value=False)
-    show_rain = layer_cols[2].checkbox("Rain", value=False)
-    active_layers = {n for n, v in [("NDVI", show_ndvi), ("LST", show_lst), ("Rainfall", show_rain)] if v}
-
-    st.sidebar.divider()
     st.sidebar.markdown("**🐘 Telemetry Display**")
     bulls_shown = st.sidebar.multiselect("Collared bulls (EarthRanger feed)", BULLS, default=BULLS)
     focus_bull = st.sidebar.selectbox("Focus bull for analytics", bulls_shown or BULLS)
@@ -1045,7 +1046,6 @@ def main() -> None:
         op_map = build_operational_map(
             env, telemetry_df, steps_df, risk_df, bulls_shown,
             baseline_corridors, projections, show_counterfactual, timeline_label,
-            active_layers=active_layers,
         )
         st_folium(op_map, height=560, use_container_width=True)
 
