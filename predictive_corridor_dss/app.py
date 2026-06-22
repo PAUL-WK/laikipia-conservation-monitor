@@ -684,25 +684,54 @@ def build_operational_map(env: dict, telemetry_df: pd.DataFrame, steps_df: pd.Da
         attr="Esri World Imagery", name="Satellite (Esri)", overlay=False, control=True, show=False,
     ).add_to(m)
 
-    # ── Live GEE raster stream (NDVI anomaly / LST / Rainfall) — togglable ──
-    if env.get("source") == "live" and env.get("ndvi_tile_url"):
-        folium.raster_layers.TileLayer(
-            tiles=env["ndvi_tile_url"], attr="Google Earth Engine — NDVI Anomaly",
-            name="NDVI Anomaly (Live GEE)", overlay=True, opacity=0.55,
-            show="NDVI" in active_layers,
-        ).add_to(m)
-    if env.get("source") == "live" and env.get("lst_tile_url"):
-        folium.raster_layers.TileLayer(
-            tiles=env["lst_tile_url"], attr="Google Earth Engine — LST",
-            name="Land Surface Temp (Live GEE)", overlay=True, opacity=0.55,
-            show="LST" in active_layers,
-        ).add_to(m)
-    if env.get("source") == "live" and env.get("rain_tile_url"):
-        folium.raster_layers.TileLayer(
-            tiles=env["rain_tile_url"], attr="Google Earth Engine — CHIRPS Rainfall",
-            name="Rainfall (Live GEE)", overlay=True, opacity=0.55,
-            show="Rainfall" in active_layers,
-        ).add_to(m)
+    # ── Environmental overlays (NDVI / LST / Rainfall) — always present, ────
+    # ── togglable in the in-map panel; live GEE tile if available, else a ───
+    # ── deterministic synthetic gridded heatmap so the checkbox never vanishes
+    is_live = env.get("source") == "live"
+
+    def add_env_overlay(layer_key: str, tile_url: str | None, label: str,
+                         palette: list[str], synthetic_mean: float, value_range: tuple[float, float]) -> None:
+        show = layer_key in active_layers
+        if is_live and tile_url:
+            folium.raster_layers.TileLayer(
+                tiles=tile_url, attr=f"Google Earth Engine — {label}",
+                name=f"{label} (Live GEE)", overlay=True, opacity=0.55, show=show,
+            ).add_to(m)
+            return
+        fg = folium.FeatureGroup(name=f"{label} (Synthetic)", overlay=True, show=show)
+        rng = np.random.default_rng(abs(hash((layer_key, round(synthetic_mean, 3)))) % (2**31))
+        lo, hi = value_range
+        n_cells = 6
+        lat_step = (BBOX["max_lat"] - BBOX["min_lat"]) / n_cells
+        lon_step = (BBOX["max_lon"] - BBOX["min_lon"]) / n_cells
+        for i in range(n_cells):
+            for j in range(n_cells):
+                cell_val = float(np.clip(synthetic_mean + rng.normal(0, (hi - lo) * 0.12), lo, hi))
+                frac = (cell_val - lo) / (hi - lo + 1e-9)
+                colour = palette[min(int(frac * len(palette)), len(palette) - 1)]
+                lat0 = BBOX["min_lat"] + i * lat_step
+                lon0 = BBOX["min_lon"] + j * lon_step
+                folium.Rectangle(
+                    bounds=[[lat0, lon0], [lat0 + lat_step, lon0 + lon_step]],
+                    color=None, weight=0, fill=True, fill_color=colour, fill_opacity=0.45,
+                    tooltip=f"{label} (synthetic est.): {cell_val:.2f}",
+                ).add_to(fg)
+        fg.add_to(m)
+
+    add_env_overlay(
+        "NDVI", env.get("ndvi_tile_url"), "NDVI Anomaly",
+        ["#800026", "#e31a1c", "#ffffb2", "#78c679", "#1a9850"],
+        env.get("mean_ndvi_anom", -0.1), (-0.5, 0.5),
+    )
+    add_env_overlay(
+        "LST", env.get("lst_tile_url"), "Land Surface Temp",
+        RISK_PALETTE, env.get("mean_lst_c", 30.0), (15.0, 45.0),
+    )
+    add_env_overlay(
+        "Rainfall", env.get("rain_tile_url"), "Rainfall",
+        ["#ffffff", "#c6dbef", "#6baed6", "#2171b5", "#08306b"],
+        env.get("mean_rain_mm", 5.0), (0.0, 60.0),
+    )
 
     # ── Risk grid (bottleneck cells glow hotter on longer horizons) ─────────
     for _, row in grid_df.iterrows():
