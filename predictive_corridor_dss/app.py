@@ -520,6 +520,7 @@ def project_forward_trajectory(telemetry_df: pd.DataFrame, bull: str, days_out: 
     target farm proportionally to forecast severity. days_out == 0 returns
     the live position unchanged ("Today").
     """
+    days_out = int(round(days_out))
     rng = np.random.default_rng(seed + hash(bull) % 1000)
     grp = telemetry_df[telemetry_df["subject_id"] == bull].sort_values("hour_idx")
     lon, lat = float(grp["lon"].iloc[-1]), float(grp["lat"].iloc[-1])
