@@ -429,9 +429,14 @@ def main() -> None:
             })
         )
         st.dataframe(
-            display_df.style.background_gradient(subset=["Risk %"], cmap="YlOrRd"),
+            display_df,
             use_container_width=True,
             height=320,
+            column_config={
+                "Risk %": st.column_config.ProgressColumn(
+                    "Risk %", min_value=0, max_value=100, format="%.1f%%",
+                ),
+            },
         )
 
 
