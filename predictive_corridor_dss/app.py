@@ -89,8 +89,12 @@ KEY_PATH = ROOT / "covariate_extractor" / "secrets" / "gee_service_account.json"
 LOCAL_KEY_PATH = Path(__file__).parent / "gee-service-key.json"
 PROJECT_ID = "ee-kimanipaul21"
 
-# Laikipia–Samburu ecosystem bounding box
+# Laikipia–Samburu ecosystem bounding box — used for the AOI, risk grid & telemetry
 BBOX = {"min_lon": 36.70, "max_lon": 37.55, "min_lat": 0.10, "max_lat": 1.20}
+
+# Kenya-wide bounding box — environmental layers (NDVI/LST/Rainfall) span this,
+# matching how the live GEE tiles stream un-clipped past the AOI.
+COUNTRY_BBOX = {"min_lon": 33.90, "max_lon": 41.90, "min_lat": -4.70, "max_lat": 5.10}
 
 BULLS = ["Bull_01", "Bull_02", "Bull_03"]
 BULL_COLOURS = {"Bull_01": "#52b788", "Bull_02": "#4895ef", "Bull_03": "#f3722c"}
@@ -206,20 +210,21 @@ def fetch_live_environmental_layers(gee_ready: bool, ref_date: str) -> dict:
             end = ee.Date(ref_date)
             start = end.advance(-10, "day")
 
+            # No .clip(region) — tiles stream continuously (whole MODIS/CHIRPS
+            # swath), exactly like a native GEE layer; only the bbox-mean stats
+            # below are scoped to the AOI.
             lst_img = (
                 ee.ImageCollection("MODIS/061/MOD11A1")
                 .filterDate(start, end)
                 .select("LST_Day_1km")
                 .mean()
                 .multiply(0.02).subtract(273.15)
-                .clip(region)
             )
             chirps_img = (
                 ee.ImageCollection("UCSB-CHG/CHIRPS/DAILY")
                 .filterDate(start, end)
                 .select("precipitation")
                 .sum()
-                .clip(region)
             )
             ndvi_img = (
                 ee.ImageCollection("MODIS/061/MOD13Q1")
@@ -227,7 +232,6 @@ def fetch_live_environmental_layers(gee_ready: bool, ref_date: str) -> dict:
                 .select("NDVI")
                 .mean()
                 .multiply(0.0001)
-                .clip(region)
             )
             ndvi_anom_img = ndvi_img.subtract(0.45)  # crude anomaly vs long-term mean proxy
 
@@ -701,19 +705,30 @@ def build_operational_map(env: dict, telemetry_df: pd.DataFrame, steps_df: pd.Da
         fg = folium.FeatureGroup(name=f"{label} (Synthetic)", overlay=True, show=show)
         rng = np.random.default_rng(abs(hash((layer_key, round(synthetic_mean, 3)))) % (2**31))
         lo, hi = value_range
-        n_cells = 6
-        lat_step = (BBOX["max_lat"] - BBOX["min_lat"]) / n_cells
-        lon_step = (BBOX["max_lon"] - BBOX["min_lon"]) / n_cells
+        # Spans the whole country bbox (not just the AOI) so the layer behaves
+        # like an un-clipped GEE tile even without live credentials. The AOI
+        # neighbourhood is biased toward the real synthetic mean; the rest of
+        # the country gets plausible regional variation around it.
+        n_cells = 18
+        lat_step = (COUNTRY_BBOX["max_lat"] - COUNTRY_BBOX["min_lat"]) / n_cells
+        lon_step = (COUNTRY_BBOX["max_lon"] - COUNTRY_BBOX["min_lon"]) / n_cells
+        aoi_clat = (BBOX["min_lat"] + BBOX["max_lat"]) / 2
+        aoi_clon = (BBOX["min_lon"] + BBOX["max_lon"]) / 2
         for i in range(n_cells):
             for j in range(n_cells):
-                cell_val = float(np.clip(synthetic_mean + rng.normal(0, (hi - lo) * 0.12), lo, hi))
+                lat0 = COUNTRY_BBOX["min_lat"] + i * lat_step
+                lon0 = COUNTRY_BBOX["min_lon"] + j * lon_step
+                cell_clat, cell_clon = lat0 + lat_step / 2, lon0 + lon_step / 2
+                dist_from_aoi = math.hypot(cell_clat - aoi_clat, cell_clon - aoi_clon)
+                drift = np.clip(dist_from_aoi * 0.04, 0, (hi - lo) * 0.3)
+                cell_val = float(np.clip(
+                    synthetic_mean + rng.normal(0, (hi - lo) * 0.12) + rng.normal(0, drift), lo, hi,
+                ))
                 frac = (cell_val - lo) / (hi - lo + 1e-9)
                 colour = palette[min(int(frac * len(palette)), len(palette) - 1)]
-                lat0 = BBOX["min_lat"] + i * lat_step
-                lon0 = BBOX["min_lon"] + j * lon_step
                 folium.Rectangle(
                     bounds=[[lat0, lon0], [lat0 + lat_step, lon0 + lon_step]],
-                    color=None, weight=0, fill=True, fill_color=colour, fill_opacity=0.45,
+                    color=None, weight=0, fill=True, fill_color=colour, fill_opacity=0.4,
                     tooltip=f"{label} (synthetic est.): {cell_val:.2f}",
                 ).add_to(fg)
         fg.add_to(m)
@@ -733,7 +748,17 @@ def build_operational_map(env: dict, telemetry_df: pd.DataFrame, steps_df: pd.Da
         env.get("mean_rain_mm", 5.0), (0.0, 60.0),
     )
 
+    # ── AOI boundary — togglable outline of the Laikipia–Samburu study area ─
+    aoi_fg = folium.FeatureGroup(name="AOI Boundary (Laikipia–Samburu)", overlay=True, show=True)
+    folium.Rectangle(
+        bounds=[[BBOX["min_lat"], BBOX["min_lon"]], [BBOX["max_lat"], BBOX["max_lon"]]],
+        color="#52b788", weight=2.5, fill=False, dash_array="6,4",
+        tooltip="Area of Interest — Laikipia–Samburu Ecosystem",
+    ).add_to(aoi_fg)
+    aoi_fg.add_to(m)
+
     # ── Risk grid (bottleneck cells glow hotter on longer horizons) ─────────
+    grid_fg = folium.FeatureGroup(name="Connectivity Risk Grid", overlay=True, show=True)
     for _, row in grid_df.iterrows():
         bounds = [[row["lat0"], row["lon0"]], [row["lat1"], row["lon1"]]]
         is_crit = bool(row["bottleneck"])
@@ -747,7 +772,8 @@ def build_operational_map(env: dict, telemetry_df: pd.DataFrame, steps_df: pd.Da
                 f"Cell {row['cell_id']}<br>Risk: <b>{row['risk_score']:.1f}%</b>"
                 + ("<br><b>⚠️ Bottleneck — " + timeline_label + "</b>" if is_crit else "")
             ),
-        ).add_to(m)
+        ).add_to(grid_fg)
+    grid_fg.add_to(m)
 
     # ── Baseline corridor (semi-transparent green polygon band) ─────────────
     for bull in bulls_shown:
@@ -808,6 +834,33 @@ def build_operational_map(env: dict, telemetry_df: pd.DataFrame, steps_df: pd.Da
         ).add_to(m)
 
     folium.LayerControl(collapsed=False).add_to(m)
+
+    def gradient_bar(stops: list[str]) -> str:
+        return f"linear-gradient(to right, {', '.join(stops)})"
+
+    env_legend_html = f"""
+    <div style="position:fixed;bottom:30px;left:10px;z-index:1000;
+                background:rgba(10,20,15,.88);padding:10px 14px;border-radius:8px;
+                font-family:'Inter',sans-serif;font-size:11px;color:#ddd;line-height:1.4;width:170px">
+      <div style="font-weight:800;font-size:12px;margin-bottom:6px;color:#52b788">ENVIRONMENTAL LAYERS</div>
+      <div style="margin-bottom:6px">
+        <div>NDVI Anomaly</div>
+        <div style="height:8px;border-radius:3px;background:{gradient_bar(['#800026', '#ffffb2', '#1a9850'])}"></div>
+        <div style="display:flex;justify-content:space-between;color:#999"><span>-0.5</span><span>+0.5</span></div>
+      </div>
+      <div style="margin-bottom:6px">
+        <div>Land Surface Temp (°C)</div>
+        <div style="height:8px;border-radius:3px;background:{gradient_bar(RISK_PALETTE)}"></div>
+        <div style="display:flex;justify-content:space-between;color:#999"><span>15</span><span>45</span></div>
+      </div>
+      <div>
+        <div>Rainfall (mm, 10d)</div>
+        <div style="height:8px;border-radius:3px;background:{gradient_bar(['#ffffff', '#c6dbef', '#6baed6', '#2171b5', '#08306b'])}"></div>
+        <div style="display:flex;justify-content:space-between;color:#999"><span>0</span><span>60</span></div>
+      </div>
+    </div>
+    """
+    m.get_root().html.add_child(folium.Element(env_legend_html))
 
     legend_html = """
     <div style="position:fixed;bottom:30px;right:10px;z-index:1000;
