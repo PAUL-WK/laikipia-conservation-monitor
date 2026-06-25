@@ -32,6 +32,8 @@ import folium
 import numpy as np
 import pandas as pd
 import streamlit as st
+from matplotlib.colors import LinearSegmentedColormap
+from PIL import Image
 from streamlit_folium import st_folium
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -690,7 +692,7 @@ def build_operational_map(env: dict, telemetry_df: pd.DataFrame, steps_df: pd.Da
 
     # ── Environmental overlays (NDVI / LST / Rainfall) — always present, ────
     # ── togglable in the in-map panel; live GEE tile if available, else a ───
-    # ── deterministic synthetic gridded heatmap so the checkbox never vanishes
+    # ── continuous synthetic raster (smooth pixels, not a discrete grid) ────
     is_live = env.get("source") == "live"
 
     def add_env_overlay(layer_key: str, tile_url: str | None, label: str,
@@ -702,36 +704,43 @@ def build_operational_map(env: dict, telemetry_df: pd.DataFrame, steps_df: pd.Da
                 name=f"{label} (Live GEE)", overlay=True, opacity=0.55, show=show,
             ).add_to(m)
             return
-        fg = folium.FeatureGroup(name=f"{label} (Synthetic)", overlay=True, show=show)
-        rng = np.random.default_rng(abs(hash((layer_key, round(synthetic_mean, 3)))) % (2**31))
+
+        # Continuous synthetic raster: a coarse seeded noise field, smoothly
+        # upsampled (bilinear) to pixel resolution and colour-mapped — looks
+        # like an un-clipped Sentinel/MODIS tile rather than a blocky grid.
+        # Spans the whole country bbox; values drift away from the AOI's true
+        # synthetic mean with distance, so the AOI neighbourhood stays anchored.
+        seed = abs(hash((layer_key, round(synthetic_mean, 3)))) % (2**31)
+        rng = np.random.default_rng(seed)
         lo, hi = value_range
-        # Spans the whole country bbox (not just the AOI) so the layer behaves
-        # like an un-clipped GEE tile even without live credentials. The AOI
-        # neighbourhood is biased toward the real synthetic mean; the rest of
-        # the country gets plausible regional variation around it.
-        n_cells = 18
-        lat_step = (COUNTRY_BBOX["max_lat"] - COUNTRY_BBOX["min_lat"]) / n_cells
-        lon_step = (COUNTRY_BBOX["max_lon"] - COUNTRY_BBOX["min_lon"]) / n_cells
+        coarse_n = 22
+        lat_lin = np.linspace(COUNTRY_BBOX["max_lat"], COUNTRY_BBOX["min_lat"], coarse_n)
+        lon_lin = np.linspace(COUNTRY_BBOX["min_lon"], COUNTRY_BBOX["max_lon"], coarse_n)
+        lon_grid, lat_grid = np.meshgrid(lon_lin, lat_lin)
         aoi_clat = (BBOX["min_lat"] + BBOX["max_lat"]) / 2
         aoi_clon = (BBOX["min_lon"] + BBOX["max_lon"]) / 2
-        for i in range(n_cells):
-            for j in range(n_cells):
-                lat0 = COUNTRY_BBOX["min_lat"] + i * lat_step
-                lon0 = COUNTRY_BBOX["min_lon"] + j * lon_step
-                cell_clat, cell_clon = lat0 + lat_step / 2, lon0 + lon_step / 2
-                dist_from_aoi = math.hypot(cell_clat - aoi_clat, cell_clon - aoi_clon)
-                drift = np.clip(dist_from_aoi * 0.04, 0, (hi - lo) * 0.3)
-                cell_val = float(np.clip(
-                    synthetic_mean + rng.normal(0, (hi - lo) * 0.12) + rng.normal(0, drift), lo, hi,
-                ))
-                frac = (cell_val - lo) / (hi - lo + 1e-9)
-                colour = palette[min(int(frac * len(palette)), len(palette) - 1)]
-                folium.Rectangle(
-                    bounds=[[lat0, lon0], [lat0 + lat_step, lon0 + lon_step]],
-                    color=None, weight=0, fill=True, fill_color=colour, fill_opacity=0.4,
-                    tooltip=f"{label} (synthetic est.): {cell_val:.2f}",
-                ).add_to(fg)
-        fg.add_to(m)
+        dist_from_aoi = np.hypot(lat_grid - aoi_clat, lon_grid - aoi_clon)
+        drift_scale = np.clip(dist_from_aoi * 0.04, 0, (hi - lo) * 0.3)
+        coarse_field = synthetic_mean + rng.normal(0, (hi - lo) * 0.12, size=(coarse_n, coarse_n)) \
+            + rng.normal(0, 1, size=(coarse_n, coarse_n)) * drift_scale
+        coarse_field = np.clip(coarse_field, lo, hi)
+
+        # Bilinear upsample to smooth pixel resolution (no visible grid lines).
+        px = 256
+        coarse_img = Image.fromarray(coarse_field.astype(np.float32), mode="F")
+        smooth_field = np.array(coarse_img.resize((px, px), resample=Image.BILINEAR))
+
+        frac = np.clip((smooth_field - lo) / (hi - lo + 1e-9), 0, 1)
+        cmap = LinearSegmentedColormap.from_list(layer_key, palette)
+        rgba = (cmap(frac) * 255).astype(np.uint8)
+        rgba[:, :, 3] = int(0.55 * 255)  # uniform overlay opacity, alpha channel
+
+        folium.raster_layers.ImageOverlay(
+            image=rgba,
+            bounds=[[COUNTRY_BBOX["min_lat"], COUNTRY_BBOX["min_lon"]],
+                    [COUNTRY_BBOX["max_lat"], COUNTRY_BBOX["max_lon"]]],
+            name=f"{label} (Synthetic)", overlay=True, control=True, show=show,
+        ).add_to(m)
 
     add_env_overlay(
         "NDVI", env.get("ndvi_tile_url"), "NDVI Anomaly",
