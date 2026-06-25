@@ -10,3 +10,5 @@ scipy>=1.12.0
 tqdm>=4.66.0
 colorlog>=6.8.0
 shapely>=2.0.0
+Pillow>=10.0.0
+altair>=5.0.0

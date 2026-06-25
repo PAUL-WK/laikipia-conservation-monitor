@@ -32,7 +32,6 @@ import folium
 import numpy as np
 import pandas as pd
 import streamlit as st
-from matplotlib.colors import LinearSegmentedColormap
 from PIL import Image
 from streamlit_folium import st_folium
 
@@ -667,6 +666,22 @@ def risk_colour(score: float) -> str:
     return RISK_PALETTE[idx]
 
 
+def hex_palette_to_rgba(frac: np.ndarray, palette: list[str], alpha: int = 140) -> np.ndarray:
+    """
+    Maps a [0,1] float array to RGBA uint8 by linearly interpolating across a
+    hex colour palette — a matplotlib-free stand-in for cmap(frac), since
+    matplotlib isn't a declared/guaranteed dependency on the deploy target.
+    """
+    stops = np.linspace(0.0, 1.0, len(palette))
+    rgb_stops = np.array([[int(h.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4)] for h in palette])
+    flat = frac.ravel()
+    r = np.interp(flat, stops, rgb_stops[:, 0])
+    g = np.interp(flat, stops, rgb_stops[:, 1])
+    b = np.interp(flat, stops, rgb_stops[:, 2])
+    rgba = np.stack([r, g, b, np.full_like(r, alpha)], axis=-1).astype(np.uint8)
+    return rgba.reshape(*frac.shape, 4)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # LAYER 4 — DUAL-LAYER INTERACTIVE MAP
 # ══════════════════════════════════════════════════════════════════════════════
@@ -731,9 +746,7 @@ def build_operational_map(env: dict, telemetry_df: pd.DataFrame, steps_df: pd.Da
         smooth_field = np.array(coarse_img.resize((px, px), resample=Image.BILINEAR))
 
         frac = np.clip((smooth_field - lo) / (hi - lo + 1e-9), 0, 1)
-        cmap = LinearSegmentedColormap.from_list(layer_key, palette)
-        rgba = (cmap(frac) * 255).astype(np.uint8)
-        rgba[:, :, 3] = int(0.55 * 255)  # uniform overlay opacity, alpha channel
+        rgba = hex_palette_to_rgba(frac, palette, alpha=int(0.55 * 255))
 
         folium.raster_layers.ImageOverlay(
             image=rgba,
