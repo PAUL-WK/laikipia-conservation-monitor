@@ -126,6 +126,13 @@ RISK_PALETTE = [
     "#fc4e2a", "#e31a1c", "#bd0026", "#800026",
 ]
 
+# Scientific colour ramps for the environmental index layers — distinct from
+# RISK_PALETTE (reserved for the connectivity-risk grid) so temperature is
+# never visually conflated with "risk".
+NDVI_PALETTE = ["#a50026", "#d73027", "#fee08b", "#a6d96a", "#1a9850", "#006837"]  # -1 → +1
+LST_PALETTE = ["#313695", "#74add1", "#ffffbf", "#f46d43", "#a50026"]              # 10°C → 50°C, diverging thermal
+RAIN_PALETTE = ["#ffffff", "#c6dbef", "#6baed6", "#2171b5", "#08306b"]             # 0 → 30 mm/day
+
 SEED = 42
 
 
@@ -221,11 +228,13 @@ def fetch_live_environmental_layers(gee_ready: bool, ref_date: str) -> dict:
                 .mean()
                 .multiply(0.02).subtract(273.15)
             )
+            # mm/day mean over the trailing 10-day window — the standard
+            # CHIRPS daily-precipitation-rate unit, rather than a raw 10-day sum.
             chirps_img = (
                 ee.ImageCollection("UCSB-CHG/CHIRPS/DAILY")
                 .filterDate(start, end)
                 .select("precipitation")
-                .sum()
+                .mean()
             )
             ndvi_img = (
                 ee.ImageCollection("MODIS/061/MOD13Q1")
@@ -236,14 +245,19 @@ def fetch_live_environmental_layers(gee_ready: bool, ref_date: str) -> dict:
             )
             ndvi_anom_img = ndvi_img.subtract(0.45)  # crude anomaly vs long-term mean proxy
 
-            lst_mapid  = lst_img.getMapId({"min": 15, "max": 45, "palette": RISK_PALETTE})
-            ndvi_mapid = ndvi_anom_img.getMapId({"min": -0.5, "max": 0.5, "palette": ["#800026", "#ffffb2", "#1a9850"]})
-            rain_mapid = chirps_img.getMapId({"min": 0, "max": 60, "palette": ["#ffffff", "#c6dbef", "#6baed6", "#2171b5", "#08306b"]})
+            # Scientifically accurate display ranges: NDVI uses its full
+            # physical range (-1 to 1); LST uses a thermal (blue→white→red)
+            # ramp over a realistic daytime-LST band for this savanna region;
+            # rainfall uses mm/day, not a clipped/arbitrary anomaly window.
+            lst_mapid  = lst_img.getMapId({"min": 10, "max": 50, "palette": LST_PALETTE})
+            ndvi_mapid = ndvi_img.getMapId({"min": -1, "max": 1, "palette": NDVI_PALETTE})
+            rain_mapid = chirps_img.getMapId({"min": 0, "max": 30, "palette": RAIN_PALETTE})
 
             stats = (
                 lst_img.rename("lst")
                 .addBands(chirps_img.rename("rain"))
-                .addBands(ndvi_anom_img.rename("ndvi"))
+                .addBands(ndvi_img.rename("ndvi"))
+                .addBands(ndvi_anom_img.rename("ndvi_anom"))
                 .reduceRegion(reducer=ee.Reducer.mean(), geometry=region, scale=2000, bestEffort=True)
                 .getInfo()
             )
@@ -255,7 +269,8 @@ def fetch_live_environmental_layers(gee_ready: bool, ref_date: str) -> dict:
                 "rain_tile_url": rain_mapid["tile_fetcher"].url_format,
                 "mean_lst_c": float(stats.get("lst") or 30.0),
                 "mean_rain_mm": float(stats.get("rain") or 5.0),
-                "mean_ndvi_anom": float(stats.get("ndvi") or -0.1),
+                "mean_ndvi": float(stats.get("ndvi") or 0.3),
+                "mean_ndvi_anom": float(stats.get("ndvi_anom") or -0.1),
             }
         except Exception as exc:
             st.session_state["_gee_fetch_error"] = str(exc)
@@ -269,7 +284,8 @@ def fetch_live_environmental_layers(gee_ready: bool, ref_date: str) -> dict:
         "ndvi_tile_url": None,
         "rain_tile_url": None,
         "mean_lst_c": round(34.0 + rng.normal(0, 1.5), 1),
-        "mean_rain_mm": round(max(0.0, rng.normal(4.0, 2.0)), 1),
+        "mean_rain_mm": round(max(0.0, rng.normal(2.5, 1.2)), 1),  # mm/day
+        "mean_ndvi": round(float(np.clip(0.3 + rng.normal(-0.15, 0.08), -1, 1)), 3),
         "mean_ndvi_anom": round(float(rng.normal(-0.15, 0.08)), 3),
     }
 
@@ -666,6 +682,64 @@ def risk_colour(score: float) -> str:
     return RISK_PALETTE[idx]
 
 
+def synthetic_field(layer_key: str, synthetic_mean: float, value_range: tuple[float, float],
+                     px: int = 256) -> np.ndarray:
+    """
+    Deterministic (seeded) coarse noise field, bilinearly upsampled to a
+    smooth px×px raster spanning COUNTRY_BBOX — used both to paint the
+    overlay image and to answer point-click queries, so the two always agree.
+    """
+    seed = abs(hash((layer_key, round(synthetic_mean, 3)))) % (2**31)
+    rng = np.random.default_rng(seed)
+    lo, hi = value_range
+    coarse_n = 22
+    lat_lin = np.linspace(COUNTRY_BBOX["max_lat"], COUNTRY_BBOX["min_lat"], coarse_n)
+    lon_lin = np.linspace(COUNTRY_BBOX["min_lon"], COUNTRY_BBOX["max_lon"], coarse_n)
+    lon_grid, lat_grid = np.meshgrid(lon_lin, lat_lin)
+    aoi_clat = (BBOX["min_lat"] + BBOX["max_lat"]) / 2
+    aoi_clon = (BBOX["min_lon"] + BBOX["max_lon"]) / 2
+    dist_from_aoi = np.hypot(lat_grid - aoi_clat, lon_grid - aoi_clon)
+    drift_scale = np.clip(dist_from_aoi * 0.04, 0, (hi - lo) * 0.3)
+    coarse_field = synthetic_mean + rng.normal(0, (hi - lo) * 0.12, size=(coarse_n, coarse_n)) \
+        + rng.normal(0, 1, size=(coarse_n, coarse_n)) * drift_scale
+    coarse_field = np.clip(coarse_field, lo, hi)
+    coarse_img = Image.fromarray(coarse_field.astype(np.float32), mode="F")
+    return np.array(coarse_img.resize((px, px), resample=Image.BILINEAR))
+
+
+def sample_synthetic_field_at(layer_key: str, synthetic_mean: float, value_range: tuple[float, float],
+                               lat: float, lon: float) -> float:
+    """Look up the value of the same field rendered on the map, at a clicked point."""
+    field = synthetic_field(layer_key, synthetic_mean, value_range)
+    px = field.shape[0]
+    row = int(np.clip((COUNTRY_BBOX["max_lat"] - lat) / (COUNTRY_BBOX["max_lat"] - COUNTRY_BBOX["min_lat"]) * (px - 1), 0, px - 1))
+    col = int(np.clip((lon - COUNTRY_BBOX["min_lon"]) / (COUNTRY_BBOX["max_lon"] - COUNTRY_BBOX["min_lon"]) * (px - 1), 0, px - 1))
+    return float(field[row, col])
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def sample_live_point(layer_key: str, lat: float, lon: float, ref_date: str) -> float | None:
+    """Point-sample the live GEE image for the given layer at a clicked location."""
+    try:
+        import ee
+        point = ee.Geometry.Point([lon, lat])
+        end = ee.Date(ref_date)
+        start = end.advance(-10, "day")
+        if layer_key == "LST":
+            img = (ee.ImageCollection("MODIS/061/MOD11A1").filterDate(start, end)
+                   .select("LST_Day_1km").mean().multiply(0.02).subtract(273.15))
+        elif layer_key == "NDVI":
+            img = (ee.ImageCollection("MODIS/061/MOD13Q1").filterDate(start, end)
+                   .select("NDVI").mean().multiply(0.0001))
+        else:
+            img = (ee.ImageCollection("UCSB-CHG/CHIRPS/DAILY").filterDate(start, end)
+                   .select("precipitation").mean())
+        value = img.reduceRegion(reducer=ee.Reducer.mean(), geometry=point, scale=1000, bestEffort=True).getInfo()
+        return float(next(iter(value.values())))
+    except Exception:
+        return None
+
+
 def hex_palette_to_rgba(frac: np.ndarray, palette: list[str], alpha: int = 140) -> np.ndarray:
     """
     Maps a [0,1] float array to RGBA uint8 by linearly interpolating across a
@@ -720,31 +794,11 @@ def build_operational_map(env: dict, telemetry_df: pd.DataFrame, steps_df: pd.Da
             ).add_to(m)
             return
 
-        # Continuous synthetic raster: a coarse seeded noise field, smoothly
-        # upsampled (bilinear) to pixel resolution and colour-mapped — looks
-        # like an un-clipped Sentinel/MODIS tile rather than a blocky grid.
-        # Spans the whole country bbox; values drift away from the AOI's true
-        # synthetic mean with distance, so the AOI neighbourhood stays anchored.
-        seed = abs(hash((layer_key, round(synthetic_mean, 3)))) % (2**31)
-        rng = np.random.default_rng(seed)
+        # Continuous synthetic raster — looks like an un-clipped Sentinel/MODIS
+        # tile rather than a blocky grid; shared helper so a click-query at
+        # this same point always agrees with what's painted on the map.
         lo, hi = value_range
-        coarse_n = 22
-        lat_lin = np.linspace(COUNTRY_BBOX["max_lat"], COUNTRY_BBOX["min_lat"], coarse_n)
-        lon_lin = np.linspace(COUNTRY_BBOX["min_lon"], COUNTRY_BBOX["max_lon"], coarse_n)
-        lon_grid, lat_grid = np.meshgrid(lon_lin, lat_lin)
-        aoi_clat = (BBOX["min_lat"] + BBOX["max_lat"]) / 2
-        aoi_clon = (BBOX["min_lon"] + BBOX["max_lon"]) / 2
-        dist_from_aoi = np.hypot(lat_grid - aoi_clat, lon_grid - aoi_clon)
-        drift_scale = np.clip(dist_from_aoi * 0.04, 0, (hi - lo) * 0.3)
-        coarse_field = synthetic_mean + rng.normal(0, (hi - lo) * 0.12, size=(coarse_n, coarse_n)) \
-            + rng.normal(0, 1, size=(coarse_n, coarse_n)) * drift_scale
-        coarse_field = np.clip(coarse_field, lo, hi)
-
-        # Bilinear upsample to smooth pixel resolution (no visible grid lines).
-        px = 256
-        coarse_img = Image.fromarray(coarse_field.astype(np.float32), mode="F")
-        smooth_field = np.array(coarse_img.resize((px, px), resample=Image.BILINEAR))
-
+        smooth_field = synthetic_field(layer_key, synthetic_mean, value_range)
         frac = np.clip((smooth_field - lo) / (hi - lo + 1e-9), 0, 1)
         rgba = hex_palette_to_rgba(frac, palette, alpha=int(0.55 * 255))
 
@@ -756,18 +810,16 @@ def build_operational_map(env: dict, telemetry_df: pd.DataFrame, steps_df: pd.Da
         ).add_to(m)
 
     add_env_overlay(
-        "NDVI", env.get("ndvi_tile_url"), "NDVI Anomaly",
-        ["#800026", "#e31a1c", "#ffffb2", "#78c679", "#1a9850"],
-        env.get("mean_ndvi_anom", -0.1), (-0.5, 0.5),
+        "NDVI", env.get("ndvi_tile_url"), "NDVI",
+        NDVI_PALETTE, env.get("mean_ndvi", 0.3), (-1.0, 1.0),
     )
     add_env_overlay(
         "LST", env.get("lst_tile_url"), "Land Surface Temp",
-        RISK_PALETTE, env.get("mean_lst_c", 30.0), (15.0, 45.0),
+        LST_PALETTE, env.get("mean_lst_c", 30.0), (10.0, 50.0),
     )
     add_env_overlay(
         "Rainfall", env.get("rain_tile_url"), "Rainfall",
-        ["#ffffff", "#c6dbef", "#6baed6", "#2171b5", "#08306b"],
-        env.get("mean_rain_mm", 5.0), (0.0, 60.0),
+        RAIN_PALETTE, env.get("mean_rain_mm", 2.5), (0.0, 30.0),
     )
 
     # ── AOI boundary — togglable outline of the Laikipia–Samburu study area ─
@@ -866,19 +918,19 @@ def build_operational_map(env: dict, telemetry_df: pd.DataFrame, steps_df: pd.Da
                 font-family:'Inter',sans-serif;font-size:11px;color:#ddd;line-height:1.4;width:170px">
       <div style="font-weight:800;font-size:12px;margin-bottom:6px;color:#52b788">ENVIRONMENTAL LAYERS</div>
       <div style="margin-bottom:6px">
-        <div>NDVI Anomaly</div>
-        <div style="height:8px;border-radius:3px;background:{gradient_bar(['#800026', '#ffffb2', '#1a9850'])}"></div>
-        <div style="display:flex;justify-content:space-between;color:#999"><span>-0.5</span><span>+0.5</span></div>
+        <div>NDVI</div>
+        <div style="height:8px;border-radius:3px;background:{gradient_bar(NDVI_PALETTE)}"></div>
+        <div style="display:flex;justify-content:space-between;color:#999"><span>-1</span><span>+1</span></div>
       </div>
       <div style="margin-bottom:6px">
         <div>Land Surface Temp (°C)</div>
-        <div style="height:8px;border-radius:3px;background:{gradient_bar(RISK_PALETTE)}"></div>
-        <div style="display:flex;justify-content:space-between;color:#999"><span>15</span><span>45</span></div>
+        <div style="height:8px;border-radius:3px;background:{gradient_bar(LST_PALETTE)}"></div>
+        <div style="display:flex;justify-content:space-between;color:#999"><span>10</span><span>50</span></div>
       </div>
       <div>
-        <div>Rainfall (mm, 10d)</div>
-        <div style="height:8px;border-radius:3px;background:{gradient_bar(['#ffffff', '#c6dbef', '#6baed6', '#2171b5', '#08306b'])}"></div>
-        <div style="display:flex;justify-content:space-between;color:#999"><span>0</span><span>60</span></div>
+        <div>Rainfall (mm/day)</div>
+        <div style="height:8px;border-radius:3px;background:{gradient_bar(RAIN_PALETTE)}"></div>
+        <div style="display:flex;justify-content:space-between;color:#999"><span>0</span><span>30</span></div>
       </div>
     </div>
     """
@@ -1043,6 +1095,12 @@ def main() -> None:
     show_counterfactual = st.sidebar.toggle("Show counterfactual steps", value=True)
     grid_res = st.sidebar.slider("Risk grid resolution (cells/side)", 6, 18, 12)
 
+    st.sidebar.divider()
+    st.sidebar.markdown("**🔎 Point Inspector**")
+    inspect_layer = st.sidebar.radio(
+        "Layer to read on map click", ["NDVI", "LST", "Rainfall"], horizontal=True,
+    )
+
     # ── Header ────────────────────────────────────────────────────────────────
     st.markdown("""
     <h2 style='margin-bottom:2px;color:#52b788'>🐘 Predictive Corridor Decision Support System</h2>
@@ -1151,7 +1209,27 @@ def main() -> None:
             env, telemetry_df, steps_df, risk_df, bulls_shown,
             baseline_corridors, projections, show_counterfactual, timeline_label,
         )
-        st_folium(op_map, height=560, use_container_width=True)
+        map_data = st_folium(op_map, height=560, use_container_width=True)
+
+        clicked = map_data.get("last_clicked") if map_data else None
+        if clicked:
+            clat, clon = clicked["lat"], clicked["lng"]
+            layer_meta = {
+                "NDVI": ("mean_ndvi", (-1.0, 1.0), ""),
+                "LST": ("mean_lst_c", (10.0, 50.0), "°C"),
+                "Rainfall": ("mean_rain_mm", (0.0, 30.0), "mm/day"),
+            }
+            mean_key, value_range, unit = layer_meta[inspect_layer]
+            if env.get("source") == "live":
+                value = sample_live_point(inspect_layer, clat, clon, env["ref_date"])
+            else:
+                value = sample_synthetic_field_at(
+                    inspect_layer, env.get(mean_key, sum(value_range) / 2), value_range, clat, clon,
+                )
+            if value is not None:
+                st.info(f"📍 **{inspect_layer}** at ({clat:.3f}, {clon:.3f}): **{value:.3f}{unit}**")
+            else:
+                st.warning(f"No {inspect_layer} value available at that point.")
 
     with side_col:
         st.markdown("<div class='section-header'>SSF Resistance Coefficients</div>", unsafe_allow_html=True)
