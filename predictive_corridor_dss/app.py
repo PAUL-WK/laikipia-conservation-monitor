@@ -128,10 +128,12 @@ RISK_PALETTE = [
 
 # Scientific colour ramps for the environmental index layers — distinct from
 # RISK_PALETTE (reserved for the connectivity-risk grid) so temperature is
-# never visually conflated with "risk".
-NDVI_PALETTE = ["#a50026", "#d73027", "#fee08b", "#a6d96a", "#1a9850", "#006837"]  # -1 → +1
-LST_PALETTE = ["#313695", "#74add1", "#ffffbf", "#f46d43", "#a50026"]              # 10°C → 50°C, diverging thermal
-RAIN_PALETTE = ["#ffffff", "#c6dbef", "#6baed6", "#2171b5", "#08306b"]             # 0 → 30 mm/day
+# never visually conflated with "risk". Ranges/palettes mirror the validated
+# visParams used in the companion gee_map_viewer project (practical
+# land-cover bounds, not the theoretical index extremes).
+NDVI_PALETTE = ["#d73027", "#fc8d59", "#fee08b", "#d9ef8b", "#91cf60", "#1a9850"]  # -0.1 → 0.9
+LST_PALETTE = ["#313695", "#74add1", "#ffffbf", "#f46d43", "#a50026"]              # 15°C → 50°C, diverging thermal
+RAIN_PALETTE = ["#f7fbff", "#c6dbef", "#6baed6", "#2171b5", "#084594", "#08306b"]  # 0 → 300 mm (10-day cumulative)
 
 SEED = 42
 
@@ -228,13 +230,13 @@ def fetch_live_environmental_layers(gee_ready: bool, ref_date: str) -> dict:
                 .mean()
                 .multiply(0.02).subtract(273.15)
             )
-            # mm/day mean over the trailing 10-day window — the standard
-            # CHIRPS daily-precipitation-rate unit, rather than a raw 10-day sum.
+            # Cumulative sum over the trailing 10-day window, matching the
+            # gee_map_viewer reference implementation's CHIRPS visualization.
             chirps_img = (
                 ee.ImageCollection("UCSB-CHG/CHIRPS/DAILY")
                 .filterDate(start, end)
                 .select("precipitation")
-                .mean()
+                .sum()
             )
             ndvi_img = (
                 ee.ImageCollection("MODIS/061/MOD13Q1")
@@ -249,9 +251,9 @@ def fetch_live_environmental_layers(gee_ready: bool, ref_date: str) -> dict:
             # physical range (-1 to 1); LST uses a thermal (blue→white→red)
             # ramp over a realistic daytime-LST band for this savanna region;
             # rainfall uses mm/day, not a clipped/arbitrary anomaly window.
-            lst_mapid  = lst_img.getMapId({"min": 10, "max": 50, "palette": LST_PALETTE})
-            ndvi_mapid = ndvi_img.getMapId({"min": -1, "max": 1, "palette": NDVI_PALETTE})
-            rain_mapid = chirps_img.getMapId({"min": 0, "max": 30, "palette": RAIN_PALETTE})
+            lst_mapid  = lst_img.getMapId({"min": 15, "max": 50, "palette": LST_PALETTE})
+            ndvi_mapid = ndvi_img.getMapId({"min": -0.1, "max": 0.9, "palette": NDVI_PALETTE})
+            rain_mapid = chirps_img.getMapId({"min": 0, "max": 300, "palette": RAIN_PALETTE})
 
             stats = (
                 lst_img.rename("lst")
@@ -284,7 +286,7 @@ def fetch_live_environmental_layers(gee_ready: bool, ref_date: str) -> dict:
         "ndvi_tile_url": None,
         "rain_tile_url": None,
         "mean_lst_c": round(34.0 + rng.normal(0, 1.5), 1),
-        "mean_rain_mm": round(max(0.0, rng.normal(2.5, 1.2)), 1),  # mm/day
+        "mean_rain_mm": round(max(0.0, rng.normal(35.0, 18.0)), 1),  # mm, 10-day cumulative
         "mean_ndvi": round(float(np.clip(0.3 + rng.normal(-0.15, 0.08), -1, 1)), 3),
         "mean_ndvi_anom": round(float(rng.normal(-0.15, 0.08)), 3),
     }
@@ -733,7 +735,7 @@ def sample_live_point(layer_key: str, lat: float, lon: float, ref_date: str) -> 
                    .select("NDVI").mean().multiply(0.0001))
         else:
             img = (ee.ImageCollection("UCSB-CHG/CHIRPS/DAILY").filterDate(start, end)
-                   .select("precipitation").mean())
+                   .select("precipitation").sum())
         value = img.reduceRegion(reducer=ee.Reducer.mean(), geometry=point, scale=1000, bestEffort=True).getInfo()
         return float(next(iter(value.values())))
     except Exception:
@@ -811,15 +813,15 @@ def build_operational_map(env: dict, telemetry_df: pd.DataFrame, steps_df: pd.Da
 
     add_env_overlay(
         "NDVI", env.get("ndvi_tile_url"), "NDVI",
-        NDVI_PALETTE, env.get("mean_ndvi", 0.3), (-1.0, 1.0),
+        NDVI_PALETTE, env.get("mean_ndvi", 0.3), (-0.1, 0.9),
     )
     add_env_overlay(
         "LST", env.get("lst_tile_url"), "Land Surface Temp",
-        LST_PALETTE, env.get("mean_lst_c", 30.0), (10.0, 50.0),
+        LST_PALETTE, env.get("mean_lst_c", 30.0), (15.0, 50.0),
     )
     add_env_overlay(
         "Rainfall", env.get("rain_tile_url"), "Rainfall",
-        RAIN_PALETTE, env.get("mean_rain_mm", 2.5), (0.0, 30.0),
+        RAIN_PALETTE, env.get("mean_rain_mm", 35.0), (0.0, 300.0),
     )
 
     # ── AOI boundary — togglable outline of the Laikipia–Samburu study area ─
@@ -920,17 +922,17 @@ def build_operational_map(env: dict, telemetry_df: pd.DataFrame, steps_df: pd.Da
       <div style="margin-bottom:6px">
         <div>NDVI</div>
         <div style="height:8px;border-radius:3px;background:{gradient_bar(NDVI_PALETTE)}"></div>
-        <div style="display:flex;justify-content:space-between;color:#999"><span>-1</span><span>+1</span></div>
+        <div style="display:flex;justify-content:space-between;color:#999"><span>-0.1</span><span>0.9</span></div>
       </div>
       <div style="margin-bottom:6px">
         <div>Land Surface Temp (°C)</div>
         <div style="height:8px;border-radius:3px;background:{gradient_bar(LST_PALETTE)}"></div>
-        <div style="display:flex;justify-content:space-between;color:#999"><span>10</span><span>50</span></div>
+        <div style="display:flex;justify-content:space-between;color:#999"><span>15</span><span>50</span></div>
       </div>
       <div>
-        <div>Rainfall (mm/day)</div>
+        <div>Rainfall (mm, 10d)</div>
         <div style="height:8px;border-radius:3px;background:{gradient_bar(RAIN_PALETTE)}"></div>
-        <div style="display:flex;justify-content:space-between;color:#999"><span>0</span><span>30</span></div>
+        <div style="display:flex;justify-content:space-between;color:#999"><span>0</span><span>300</span></div>
       </div>
     </div>
     """
@@ -1215,9 +1217,9 @@ def main() -> None:
         if clicked:
             clat, clon = clicked["lat"], clicked["lng"]
             layer_meta = {
-                "NDVI": ("mean_ndvi", (-1.0, 1.0), ""),
-                "LST": ("mean_lst_c", (10.0, 50.0), "°C"),
-                "Rainfall": ("mean_rain_mm", (0.0, 30.0), "mm/day"),
+                "NDVI": ("mean_ndvi", (-0.1, 0.9), ""),
+                "LST": ("mean_lst_c", (15.0, 50.0), "°C"),
+                "Rainfall": ("mean_rain_mm", (0.0, 300.0), "mm"),
             }
             mean_key, value_range, unit = layer_meta[inspect_layer]
             if env.get("source") == "live":
