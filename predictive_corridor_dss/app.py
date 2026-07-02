@@ -221,13 +221,14 @@ def fetch_live_environmental_layers(gee_ready: bool, ref_date: str) -> dict:
             end = ee.Date(ref_date)
 
             # Product-appropriate lookback windows:
-            # MOD13A1 (16-day composite) has ~6-week processing latency →
-            # need 60 days to guarantee at least one image is available.
-            # MOD11A2 (8-day composite) → 16 days is sufficient.
-            # CHIRPS DAILY is daily → 10-day sum for the rainfall panel.
+            # Product-appropriate lookback windows account for NASA/UCSB
+            # processing latency (typically 4-6 weeks behind real-time):
+            # MOD13A1 (16-day composite) → 60 days
+            # MOD11A2 (8-day composite)  → 16 days
+            # CHIRPS DAILY               → 40 days (also ~5-week lag)
             ndvi_start  = end.advance(-60, "day")
             lst_start   = end.advance(-16, "day")
-            rain_start  = end.advance(-10, "day")
+            rain_start  = end.advance(-40, "day")
 
             ndvi_img = (
                 ee.ImageCollection("MODIS/061/MOD13A1")
@@ -738,7 +739,7 @@ def sample_live_point(layer_key: str, lat: float, lon: float, ref_date: str) -> 
                    .select("LST_Day_1km")
                    .map(lambda i: i.multiply(0.02).subtract(273.15).rename("LST_C")).mean())
         else:
-            img = (ee.ImageCollection("UCSB-CHG/CHIRPS/DAILY").filterDate(end.advance(-10, "day"), end)
+            img = (ee.ImageCollection("UCSB-CHG/CHIRPS/DAILY").filterDate(end.advance(-40, "day"), end)
                    .select("precipitation").sum())
         value = img.reduceRegion(reducer=ee.Reducer.mean(), geometry=point, scale=1000, bestEffort=True).getInfo()
         return float(next(iter(value.values())))
