@@ -199,7 +199,7 @@ def init_gee() -> tuple[bool, str]:
         creds = ee.ServiceAccountCredentials(info["client_email"], str(key_path))
         ee.Initialize(creds, project=PROJECT_ID)
         ee.Number(1).getInfo()
-        return True, f"Connected via '{key_path.name}'."
+        return True, "Satellite imagery connected."
     except Exception as exc:
         return False, f"GEE auth failed: {exc}"
 
@@ -1007,7 +1007,7 @@ def main() -> None:
         PREDICTIVE CORRIDOR DSS
       </div>
       <div style='font-size:.65rem;color:#7a9a87;margin-top:2px'>
-        Laikipia–Samburu · Kenyatta University MSc
+        Laikipia–Samburu
       </div>
     </div>
     """, unsafe_allow_html=True)
