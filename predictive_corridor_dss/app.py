@@ -170,7 +170,7 @@ def dist_to_fence_km(plon: float, plat: float) -> float:
 # LAYER 1 — SECURE GEE AUTH & LIVE ENVIRONMENTAL INGESTION
 # ══════════════════════════════════════════════════════════════════════════════
 
-@st.cache_resource(show_spinner="Connecting to Earth Engine…")
+@st.cache_resource(show_spinner="Connecting to satellite services…")
 def init_gee() -> tuple[bool, str]:
     """
     Secure GEE initialisation via ee.ServiceAccountCredentials, reading the key
@@ -204,7 +204,7 @@ def init_gee() -> tuple[bool, str]:
         return False, f"GEE auth failed: {exc}"
 
 
-@st.cache_data(ttl=3600, show_spinner="Streaming live MODIS / CHIRPS / NDVI…")
+@st.cache_data(ttl=3600, show_spinner="Loading satellite imagery…")
 def fetch_live_environmental_layers(gee_ready: bool, ref_date: str) -> dict:
     """
     Pull live LST, precipitation and NDVI-anomaly map tiles + bbox-mean stats
