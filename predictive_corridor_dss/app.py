@@ -219,19 +219,19 @@ def fetch_live_environmental_layers(gee_ready: bool, ref_date: str) -> dict:
                 [BBOX["min_lon"], BBOX["min_lat"], BBOX["max_lon"], BBOX["max_lat"]]
             )
             end = ee.Date(ref_date)
-            start = end.advance(-10, "day")
 
-            # No .clip(region) — tiles stream continuously (whole MODIS/CHIRPS
-            # swath), exactly like a native GEE layer; only the bbox-mean stats
-            # below are scoped to the AOI.
-            # Exact same collection/band/scaling/compositing as gee_map_viewer:
-            # — MOD13A1 (not Q1): 500 m 16-day composite, more stable product
-            # — scaling applied per-image inside .map() before .median()
-            # — MOD11A2 (not A1): 8-day composite, less noisy than daily A1
-            # — LST scaling per-image before .mean()
+            # Product-appropriate lookback windows:
+            # MOD13A1 (16-day composite) has ~6-week processing latency →
+            # need 60 days to guarantee at least one image is available.
+            # MOD11A2 (8-day composite) → 16 days is sufficient.
+            # CHIRPS DAILY is daily → 10-day sum for the rainfall panel.
+            ndvi_start  = end.advance(-60, "day")
+            lst_start   = end.advance(-16, "day")
+            rain_start  = end.advance(-10, "day")
+
             ndvi_img = (
                 ee.ImageCollection("MODIS/061/MOD13A1")
-                .filterDate(start, end)
+                .filterDate(ndvi_start, end)
                 .select("NDVI")
                 .map(lambda i: i.multiply(0.0001))
                 .median()
@@ -239,14 +239,14 @@ def fetch_live_environmental_layers(gee_ready: bool, ref_date: str) -> dict:
             )
             lst_img = (
                 ee.ImageCollection("MODIS/061/MOD11A2")
-                .filterDate(start, end)
+                .filterDate(lst_start, end)
                 .select("LST_Day_1km")
                 .map(lambda i: i.multiply(0.02).subtract(273.15).rename("LST_C"))
                 .mean()
             )
             chirps_img = (
                 ee.ImageCollection("UCSB-CHG/CHIRPS/DAILY")
-                .filterDate(start, end)
+                .filterDate(rain_start, end)
                 .select("precipitation")
                 .sum()
                 .rename("rainfall_mm")
@@ -730,16 +730,15 @@ def sample_live_point(layer_key: str, lat: float, lon: float, ref_date: str) -> 
         import ee
         point = ee.Geometry.Point([lon, lat])
         end = ee.Date(ref_date)
-        start = end.advance(-10, "day")
         if layer_key == "NDVI":
-            img = (ee.ImageCollection("MODIS/061/MOD13A1").filterDate(start, end)
+            img = (ee.ImageCollection("MODIS/061/MOD13A1").filterDate(end.advance(-60, "day"), end)
                    .select("NDVI").map(lambda i: i.multiply(0.0001)).median())
         elif layer_key == "LST":
-            img = (ee.ImageCollection("MODIS/061/MOD11A2").filterDate(start, end)
+            img = (ee.ImageCollection("MODIS/061/MOD11A2").filterDate(end.advance(-16, "day"), end)
                    .select("LST_Day_1km")
                    .map(lambda i: i.multiply(0.02).subtract(273.15).rename("LST_C")).mean())
         else:
-            img = (ee.ImageCollection("UCSB-CHG/CHIRPS/DAILY").filterDate(start, end)
+            img = (ee.ImageCollection("UCSB-CHG/CHIRPS/DAILY").filterDate(end.advance(-10, "day"), end)
                    .select("precipitation").sum())
         value = img.reduceRegion(reducer=ee.Reducer.mean(), geometry=point, scale=1000, bestEffort=True).getInfo()
         return float(next(iter(value.values())))
