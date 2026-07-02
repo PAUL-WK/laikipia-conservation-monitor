@@ -93,9 +93,10 @@ PROJECT_ID = "ee-kimanipaul21"
 # Laikipia–Samburu ecosystem bounding box — used for the AOI, risk grid & telemetry
 BBOX = {"min_lon": 36.70, "max_lon": 37.55, "min_lat": 0.10, "max_lat": 1.20}
 
-# Kenya-wide bounding box — environmental layers (NDVI/LST/Rainfall) span this,
-# matching how the live GEE tiles stream un-clipped past the AOI.
-COUNTRY_BBOX = {"min_lon": 33.90, "max_lon": 41.90, "min_lat": -4.70, "max_lat": 5.10}
+# Broad Africa extent for the synthetic fallback overlay — no hard clip at
+# Kenya's border, matching the continuous pan/zoom feel of live GEE TileLayers
+# which stream globally with no spatial bounds.
+COUNTRY_BBOX = {"min_lon": -20.0, "max_lon": 55.0, "min_lat": -40.0, "max_lat": 40.0}
 
 BULLS = ["Bull_01", "Bull_02", "Bull_03"]
 BULL_COLOURS = {"Bull_01": "#52b788", "Bull_02": "#4895ef", "Bull_03": "#f3722c"}
@@ -697,7 +698,7 @@ def synthetic_field(layer_key: str, synthetic_mean: float, value_range: tuple[fl
     seed = abs(hash((layer_key, round(synthetic_mean, 3)))) % (2**31)
     rng = np.random.default_rng(seed)
     lo, hi = value_range
-    coarse_n = 22
+    coarse_n = 48  # larger grid covers the broad Africa bbox without blocky pixels
     lat_lin = np.linspace(COUNTRY_BBOX["max_lat"], COUNTRY_BBOX["min_lat"], coarse_n)
     lon_lin = np.linspace(COUNTRY_BBOX["min_lon"], COUNTRY_BBOX["max_lon"], coarse_n)
     lon_grid, lat_grid = np.meshgrid(lon_lin, lat_lin)
@@ -785,48 +786,28 @@ def build_operational_map(env: dict, telemetry_df: pd.DataFrame, steps_df: pd.Da
         attr="Esri World Imagery", name="Satellite (Esri)", overlay=False, control=True, show=False,
     ).add_to(m)
 
-    # ── Environmental overlays (NDVI / LST / Rainfall) — always present, ────
-    # ── togglable in the in-map panel; live GEE tile if available, else a ───
-    # ── continuous synthetic raster (smooth pixels, not a discrete grid) ────
+    # ── Environmental overlays (NDVI / LST / Rainfall) ──────────────────────
+    # Live GEE: TileLayer with z/x/y URLs — globally continuous, no spatial
+    # clip, exactly like gee_map_viewer. GEE offline: the checkbox still
+    # appears in the layer panel (so the UI is consistent) but no raster is
+    # added — same pattern as gee_map_viewer's "satellite data offline" state.
     is_live = env.get("source") == "live"
 
-    def add_env_overlay(layer_key: str, tile_url: str | None, label: str,
-                         palette: list[str], synthetic_mean: float, value_range: tuple[float, float]) -> None:
+    def add_env_overlay(layer_key: str, tile_url: str | None, label: str) -> None:
         show = layer_key in active_layers
         if is_live and tile_url:
             folium.raster_layers.TileLayer(
                 tiles=tile_url, attr=f"Google Earth Engine — {label}",
-                name=f"{label} (Live GEE)", overlay=True, opacity=0.55, show=show,
+                name=label, overlay=True, opacity=0.55, show=show,
             ).add_to(m)
-            return
+        else:
+            # Placeholder FeatureGroup so the checkbox exists in the layer
+            # panel even when GEE is offline — no bounded image, no clip.
+            folium.FeatureGroup(name=f"{label} (GEE offline)", overlay=True, show=False).add_to(m)
 
-        # Continuous synthetic raster — looks like an un-clipped Sentinel/MODIS
-        # tile rather than a blocky grid; shared helper so a click-query at
-        # this same point always agrees with what's painted on the map.
-        lo, hi = value_range
-        smooth_field = synthetic_field(layer_key, synthetic_mean, value_range)
-        frac = np.clip((smooth_field - lo) / (hi - lo + 1e-9), 0, 1)
-        rgba = hex_palette_to_rgba(frac, palette, alpha=int(0.55 * 255))
-
-        folium.raster_layers.ImageOverlay(
-            image=rgba,
-            bounds=[[COUNTRY_BBOX["min_lat"], COUNTRY_BBOX["min_lon"]],
-                    [COUNTRY_BBOX["max_lat"], COUNTRY_BBOX["max_lon"]]],
-            name=f"{label} (Synthetic)", overlay=True, control=True, show=show,
-        ).add_to(m)
-
-    add_env_overlay(
-        "NDVI", env.get("ndvi_tile_url"), "NDVI",
-        NDVI_PALETTE, env.get("mean_ndvi", 0.3), (-0.1, 0.9),
-    )
-    add_env_overlay(
-        "LST", env.get("lst_tile_url"), "Land Surface Temp",
-        LST_PALETTE, env.get("mean_lst_c", 30.0), (15.0, 50.0),
-    )
-    add_env_overlay(
-        "Rainfall", env.get("rain_tile_url"), "Rainfall",
-        RAIN_PALETTE, env.get("mean_rain_mm", 35.0), (0.0, 300.0),
-    )
+    add_env_overlay("NDVI",     env.get("ndvi_tile_url"), "NDVI")
+    add_env_overlay("LST",      env.get("lst_tile_url"),  "Land Surface Temp")
+    add_env_overlay("Rainfall", env.get("rain_tile_url"), "Rainfall")
 
     # ── AOI boundary — togglable outline of the Laikipia–Samburu study area ─
     aoi_fg = folium.FeatureGroup(name="AOI Boundary (Laikipia–Samburu)", overlay=True, show=True)
@@ -1220,22 +1201,15 @@ def main() -> None:
         clicked = map_data.get("last_clicked") if map_data else None
         if clicked:
             clat, clon = clicked["lat"], clicked["lng"]
-            layer_meta = {
-                "NDVI": ("mean_ndvi", (-0.1, 0.9), ""),
-                "LST": ("mean_lst_c", (15.0, 50.0), "°C"),
-                "Rainfall": ("mean_rain_mm", (0.0, 300.0), "mm"),
-            }
-            mean_key, value_range, unit = layer_meta[inspect_layer]
-            if env.get("source") == "live":
+            if env.get("source") != "live":
+                st.warning("Point inspect requires a live GEE connection — satellite data offline.")
+            else:
+                units = {"NDVI": "", "LST": "°C", "Rainfall": "mm"}
                 value = sample_live_point(inspect_layer, clat, clon, env["ref_date"])
-            else:
-                value = sample_synthetic_field_at(
-                    inspect_layer, env.get(mean_key, sum(value_range) / 2), value_range, clat, clon,
-                )
-            if value is not None:
-                st.info(f"📍 **{inspect_layer}** at ({clat:.3f}, {clon:.3f}): **{value:.3f}{unit}**")
-            else:
-                st.warning(f"No {inspect_layer} value available at that point.")
+                if value is not None:
+                    st.info(f"📍 **{inspect_layer}** at ({clat:.3f}, {clon:.3f}): **{value:.3f}{units[inspect_layer]}**")
+                else:
+                    st.warning(f"No {inspect_layer} value available at that point.")
 
     with side_col:
         st.markdown("<div class='section-header'>SSF Resistance Coefficients</div>", unsafe_allow_html=True)
