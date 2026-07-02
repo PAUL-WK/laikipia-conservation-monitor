@@ -223,43 +223,46 @@ def fetch_live_environmental_layers(gee_ready: bool, ref_date: str) -> dict:
             # No .clip(region) — tiles stream continuously (whole MODIS/CHIRPS
             # swath), exactly like a native GEE layer; only the bbox-mean stats
             # below are scoped to the AOI.
+            # Exact same collection/band/scaling/compositing as gee_map_viewer:
+            # — MOD13A1 (not Q1): 500 m 16-day composite, more stable product
+            # — scaling applied per-image inside .map() before .median()
+            # — MOD11A2 (not A1): 8-day composite, less noisy than daily A1
+            # — LST scaling per-image before .mean()
+            ndvi_img = (
+                ee.ImageCollection("MODIS/061/MOD13A1")
+                .filterDate(start, end)
+                .select("NDVI")
+                .map(lambda i: i.multiply(0.0001))
+                .median()
+                .rename("NDVI")
+            )
             lst_img = (
-                ee.ImageCollection("MODIS/061/MOD11A1")
+                ee.ImageCollection("MODIS/061/MOD11A2")
                 .filterDate(start, end)
                 .select("LST_Day_1km")
+                .map(lambda i: i.multiply(0.02).subtract(273.15).rename("LST_C"))
                 .mean()
-                .multiply(0.02).subtract(273.15)
             )
-            # Cumulative sum over the trailing 10-day window, matching the
-            # gee_map_viewer reference implementation's CHIRPS visualization.
             chirps_img = (
                 ee.ImageCollection("UCSB-CHG/CHIRPS/DAILY")
                 .filterDate(start, end)
                 .select("precipitation")
                 .sum()
-            )
-            ndvi_img = (
-                ee.ImageCollection("MODIS/061/MOD13Q1")
-                .filterDate(start, end)
-                .select("NDVI")
-                .mean()
-                .multiply(0.0001)
+                .rename("rainfall_mm")
             )
             ndvi_anom_img = ndvi_img.subtract(0.45)  # crude anomaly vs long-term mean proxy
 
-            # Scientifically accurate display ranges: NDVI uses its full
-            # physical range (-1 to 1); LST uses a thermal (blue→white→red)
-            # ramp over a realistic daytime-LST band for this savanna region;
-            # rainfall uses mm/day, not a clipped/arbitrary anomaly window.
             lst_mapid  = lst_img.getMapId({"min": 15, "max": 50, "palette": LST_PALETTE})
             ndvi_mapid = ndvi_img.getMapId({"min": -0.1, "max": 0.9, "palette": NDVI_PALETTE})
             rain_mapid = chirps_img.getMapId({"min": 0, "max": 300, "palette": RAIN_PALETTE})
 
+            # bands already named "NDVI", "LST_C", "rainfall_mm" from the
+            # image constructors above — just rename to short stat keys
             stats = (
-                lst_img.rename("lst")
-                .addBands(chirps_img.rename("rain"))
-                .addBands(ndvi_img.rename("ndvi"))
+                ndvi_img.rename("ndvi")
                 .addBands(ndvi_anom_img.rename("ndvi_anom"))
+                .addBands(lst_img.rename("lst"))
+                .addBands(chirps_img.rename("rain"))
                 .reduceRegion(reducer=ee.Reducer.mean(), geometry=region, scale=2000, bestEffort=True)
                 .getInfo()
             )
@@ -727,12 +730,13 @@ def sample_live_point(layer_key: str, lat: float, lon: float, ref_date: str) -> 
         point = ee.Geometry.Point([lon, lat])
         end = ee.Date(ref_date)
         start = end.advance(-10, "day")
-        if layer_key == "LST":
-            img = (ee.ImageCollection("MODIS/061/MOD11A1").filterDate(start, end)
-                   .select("LST_Day_1km").mean().multiply(0.02).subtract(273.15))
-        elif layer_key == "NDVI":
-            img = (ee.ImageCollection("MODIS/061/MOD13Q1").filterDate(start, end)
-                   .select("NDVI").mean().multiply(0.0001))
+        if layer_key == "NDVI":
+            img = (ee.ImageCollection("MODIS/061/MOD13A1").filterDate(start, end)
+                   .select("NDVI").map(lambda i: i.multiply(0.0001)).median())
+        elif layer_key == "LST":
+            img = (ee.ImageCollection("MODIS/061/MOD11A2").filterDate(start, end)
+                   .select("LST_Day_1km")
+                   .map(lambda i: i.multiply(0.02).subtract(273.15).rename("LST_C")).mean())
         else:
             img = (ee.ImageCollection("UCSB-CHG/CHIRPS/DAILY").filterDate(start, end)
                    .select("precipitation").sum())
