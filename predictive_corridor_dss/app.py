@@ -797,13 +797,13 @@ def build_operational_map(env: dict, telemetry_df: pd.DataFrame, steps_df: pd.Da
         show = layer_key in active_layers
         if is_live and tile_url:
             folium.raster_layers.TileLayer(
-                tiles=tile_url, attr=f"Google Earth Engine — {label}",
+                tiles=tile_url, attr=f"MODIS/CHIRPS via NASA · {label}",
                 name=label, overlay=True, opacity=0.55, show=show,
             ).add_to(m)
         else:
             # Placeholder FeatureGroup so the checkbox exists in the layer
             # panel even when GEE is offline — no bounded image, no clip.
-            folium.FeatureGroup(name=f"{label} (GEE offline)", overlay=True, show=False).add_to(m)
+            folium.FeatureGroup(name=f"{label} (Satellite offline)", overlay=True, show=False).add_to(m)
 
     add_env_overlay("NDVI",     env.get("ndvi_tile_url"), "NDVI")
     add_env_overlay("LST",      env.get("lst_tile_url"),  "Land Surface Temp")
@@ -1017,7 +1017,7 @@ def main() -> None:
     if gee_ready:
         st.sidebar.success(f"🛰️ {gee_msg}", icon="✅")
     else:
-        st.sidebar.warning(f"🛰️ Live GEE unavailable — using synthetic fallback.\n\n{gee_msg}", icon="⚠️")
+        st.sidebar.warning(f"🛰️ Live satellite data unavailable — using synthetic fallback.\n\n{gee_msg}", icon="⚠️")
 
     st.sidebar.markdown("**🕒 Temporal Mode**")
     temporal_mode = st.sidebar.radio(
@@ -1153,7 +1153,7 @@ def main() -> None:
     focus_metrics = metrics_by_bull[focus_bull]
 
     kpis = [
-        ("Data Source",        "Live GEE" if env["source"] == "live" else "Synthetic"),
+        ("Data Source",        "Live Satellite" if env["source"] == "live" else "Synthetic"),
         ("Mode",                temporal_mode.split(" ", 1)[1] if " " in temporal_mode else temporal_mode),
         ("Mean Tmax",           f"{env['mean_lst_c']:.1f}°C"),
         ("Mean Detected Lag",   f"{mean_lag:.0f} h"),
@@ -1202,7 +1202,7 @@ def main() -> None:
         if clicked:
             clat, clon = clicked["lat"], clicked["lng"]
             if env.get("source") != "live":
-                st.warning("Point inspect requires a live GEE connection — satellite data offline.")
+                st.warning("Point inspect requires a live satellite connection — data currently unavailable.")
             else:
                 units = {"NDVI": "", "LST": "°C", "Rainfall": "mm"}
                 value = sample_live_point(inspect_layer, clat, clon, env["ref_date"])
