@@ -192,7 +192,7 @@ def init_gee() -> tuple[bool, str]:
                 )
                 ee.Initialize(credentials=creds, project=PROJECT_ID)
                 ee.Number(1).getInfo()
-                return True, "Connected via Streamlit secrets."
+                return True, "Satellite imagery connected."
             return False, f"No GEE key found at '{key_path.name}'."
 
         info = json.loads(key_path.read_text(encoding="utf-8"))
